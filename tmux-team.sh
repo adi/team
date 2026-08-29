@@ -3,6 +3,8 @@
 #
 #   tmux-team.sh                    pick a config, then attach
 #   tmux-team.sh <config>           create if needed, then attach
+#   tmux-team.sh new [dir]          start a team of one from a folder
+#   tmux-team.sh join <team> [dir]  add a folder to an existing team
 #   tmux-team.sh <config> --detached   create without attaching (systemd / boot)
 #   tmux-team.sh <config> --recreate   tear the session down and rebuild it
 #   tmux-team.sh --list             list configs and whether they are running
@@ -101,14 +103,52 @@ read_config() {
   done <"$CONFIG_FILE"
 }
 
+# has_claude_session <dir>: true if Claude Code has a resumable *interactive*
+# session for <dir> - a *.jsonl transcript under ~/.claude/projects/<munged
+# path>, where every non-alphanumeric path character becomes '-'.
+#
+# File presence alone is not enough: a folder can hold transcripts from one-shot
+# -p/SDK runs ("entrypoint":"sdk-cli") which `--continue` refuses to resume
+# ("No conversation found to continue"), so require one real interactive
+# transcript. Getting this wrong hands the user a dead window.
+has_claude_session() {
+  local slug=${1//[^a-zA-Z0-9]/-} f
+  for f in "$HOME/.claude/projects/$slug"/*.jsonl; do
+    [[ -e $f ]] || continue
+    grep -q '"entrypoint":"cli"' "$f" && return 0
+  done
+  return 1
+}
+
+# claude_cmd <dir> -> the command to type in a window for <dir>.
+claude_cmd() {
+  if has_claude_session "$1"; then printf 'claude --continue'; else printf 'claude'; fi
+}
+
+# Add one window for <dir> to session <sid> and start its harness in it.
+add_window() {
+  local sid="$1" dir="$2" wid
+  wid=$(tmux new-window -t "$sid:" -n "$(basename "$dir")" -c "$dir" -P -F '#{window_id}')
+  style_window "$wid"
+  wait_for_prompt "$wid"
+  tmux send-keys -t "$wid" "$(claude_cmd "$dir")" C-m
+  printf '%s\n' "$wid"
+}
+
 # Poll until the pane has drawn its prompt, max ~3s.
+#
+# n is incremented with an assignment, not (( n++ )): that form evaluates to the
+# OLD value, so on the first pass it returns 0 -> exit status 1, and under
+# `set -e` the whole script dies right there. It only triggers when the pane is
+# still blank on the first look, which is exactly the case this loop exists for.
 wait_for_prompt() {
   local target="$1" n=0
   while (( n < 60 )); do
     [[ -n $(tmux capture-pane -p -t "$target" | tr -d '[:space:]') ]] && return 0
     sleep 0.05
-    (( n++ ))
+    n=$(( n + 1 ))
   done
+  return 0   # a slow pane is not fatal; type into it anyway
 }
 
 # ------------------------------------------------------------------ session ----
@@ -201,7 +241,7 @@ ensure_session() {
 }
 
 show_list() {
-  local c sid
+  local c sid s
   printf '%-16s %-18s %-9s %s\n' CONFIG SESSION STATUS WINDOWS
   for c in $(list_configs); do
     sid="$(session_id "${SESSION_PREFIX}${c}")"
@@ -213,6 +253,16 @@ show_list() {
         "$(CONFIG_FILE="$CONFIG_DIR/$c.conf" read_config 2>/dev/null | cut -f1 | paste -sd, -)"
     fi
   done
+
+  # Teams started with `new` have no config file; without this they would run
+  # invisibly to --list.
+  while IFS=$'\t' read -r s sid; do
+    [[ $s == "$SESSION_PREFIX"* ]] || continue
+    c="${s#$SESSION_PREFIX}"
+    [[ -f "$CONFIG_DIR/$c.conf" ]] && continue
+    printf '%-16s %-18s %-9s %s\n' "(ad-hoc)" "$s" running \
+      "$(tmux list-windows -t "$sid" -F '#{window_name}' | paste -sd, -)"
+  done < <(tmux list-sessions -F '#{session_name}	#{session_id}' 2>/dev/null)
 }
 
 # Ask which config to load, when none was named on the command line.
@@ -234,9 +284,81 @@ pick_config() {
   printf '%s\n' "${cfgs[reply-1]}"
 }
 
+# team new [dir] [--name <team>] [--detached]: a team of one, no config file.
+cmd_new() {
+  local dir='' name='' detached=0
+  while (( $# )); do
+    case "$1" in
+      --name)      name="${2:-}"; shift ;;
+      --detached)  detached=1 ;;
+      -h|--help)   echo "usage: $(basename "$0") new [dir] [--name <team>] [--detached]" >&2; exit 0 ;;
+      -*)          die "unknown option: $1" ;;
+      *)           dir="$1" ;;
+    esac
+    shift
+  done
+
+  dir="$(cd "${dir:-$PWD}" 2>/dev/null && pwd)" || die "no such directory: ${dir:-$PWD}"
+  name="${name:-$(basename "$dir")}"
+  SESSION="${SESSION_PREFIX}${name}"
+  CONFIG_NAME="$name"
+
+  [[ -z $(session_id "$SESSION") ]] \
+    || die "$SESSION already exists - 'team join $name $dir' to add this folder, or 'team $name' to attach"
+
+  local sid wid
+  sid=$(tmux new-session -d -s "$SESSION" -n "$(basename "$dir")" -c "$dir" -P -F '#{session_id}')
+  wid=$(tmux display -p -t "$sid" '#{window_id}')
+  style_window "$wid"
+  style_session "$sid"
+  tmux move-window -r -t "$sid:"
+  wait_for_prompt "$wid"
+  tmux send-keys -t "$wid" "$(claude_cmd "$dir")" C-m
+
+  echo "created $SESSION with $(basename "$dir") ($(claude_cmd "$dir"))" >&2
+  (( detached )) || attach "$sid"
+}
+
+# team join <team> [dir] [--detached]: add a folder to a team that already runs.
+cmd_join() {
+  local team='' dir='' detached=0
+  while (( $# )); do
+    case "$1" in
+      --detached)  detached=1 ;;
+      -h|--help)   echo "usage: $(basename "$0") join <team> [dir] [--detached]" >&2; exit 0 ;;
+      -*)          die "unknown option: $1" ;;
+      *)           if [[ -z $team ]]; then team="$1"; else dir="$1"; fi ;;
+    esac
+    shift
+  done
+
+  [[ -n $team ]] || die "usage: $(basename "$0") join <team> [dir]"
+  dir="$(cd "${dir:-$PWD}" 2>/dev/null && pwd)" || die "no such directory: ${dir:-$PWD}"
+
+  # Accept the team name with or without the prefix, since --list prints both.
+  local session="$team" sid
+  [[ $session == "$SESSION_PREFIX"* ]] || session="${SESSION_PREFIX}${team}"
+  sid="$(session_id "$session")"
+  [[ -n $sid ]] || die "no running team called '$team' - 'team new $dir --name $team' to start one"
+
+  # A folder already in the team would give two windows fighting over one
+  # Claude session, and --continue would resume the same transcript twice.
+  local existing
+  existing="$(tmux list-panes -s -t "$sid" -F '#{pane_current_path}' | grep -Fx "$dir" || true)"
+  [[ -z $existing ]] || die "$dir is already a window in $session"
+
+  local wid
+  wid="$(add_window "$sid" "$dir")"
+  tmux select-window -t "$wid"
+  echo "added $(basename "$dir") to $session ($(claude_cmd "$dir"))" >&2
+  (( detached )) || attach "$sid"
+}
+
 usage() {
   cat >&2 <<USAGE
 usage: $(basename "$0") [config] [--attach|--detached|--recreate|--colors]
+       $(basename "$0") new [dir] [--name <team>] [--detached]
+       $(basename "$0") join <team> [dir] [--detached]
        $(basename "$0") --list
        $(basename "$0") --session <name> <config>
 
@@ -245,6 +367,13 @@ USAGE
 }
 
 # ---------------------------------------------------------------------- main ---
+# Subcommands come first and parse their own arguments. A config named "new" or
+# "join" would be shadowed; name one of those and use --session to reach it.
+case "${1:-}" in
+  new)  shift; cmd_new "$@";  exit 0 ;;
+  join) shift; cmd_join "$@"; exit 0 ;;
+esac
+
 MODE=attach; CONFIG_NAME=''; SESSION_OVERRIDE=''; STYLE_WID=''
 while (( $# )); do
   case "$1" in

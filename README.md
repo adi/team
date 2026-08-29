@@ -11,6 +11,36 @@ running a harness, and a status bar whose colour is derived from the folder name
 | `tmux-team.sh`  | builds or attaches to the session for a config |
 | `install.sh`   | installs the `team` command and the boot-time user services |
 
+## Ad-hoc teams
+
+A config file is for a lineup you keep coming back to. For everything else,
+build a team as you go:
+
+```bash
+cd ~/work/api
+team new                      # team-api, one window, claude running in it
+team new ~/work/api           # same, from anywhere
+team new ~/work/api --name b2b  # call the team something else
+
+cd ~/work/web
+team join api                 # add this folder to team-api as a new window
+team join api ~/work/worker   # or name the folder explicitly
+```
+
+Each window runs `claude --continue` when that folder has a resumable Claude
+session and plain `claude` when it does not. The check is not "is there a
+transcript file": a folder can hold transcripts from one-shot `-p`/SDK runs that
+`--continue` refuses to resume, so it looks for at least one *interactive*
+transcript and falls back to a fresh session otherwise. A window that opens on
+"No conversation found to continue" is worse than one that just starts clean.
+
+`join` refuses a folder that is already a window in that team — two windows on
+one folder would both `--continue` the same transcript — and refuses a team that
+is not running, rather than quietly creating it. Teams made this way have no
+config file, so `--list` shows them as `(ad-hoc)`.
+
+Both take `--detached` to build without attaching.
+
 ## Configs
 
 Each `configs/<name>.conf` owns a session called **`team-<name>`**. The `team-`
@@ -52,6 +82,8 @@ Note: `--auto` is not a claude flag — `auto` is a *permission mode*, hence
 ./install.sh example          # ...or enable only some configs
 team                           # pick a config from a menu, then attach
 team example                   # attach (creates the session first if it is not running)
+team new [dir]                 # start a team of one from a folder (no config file)
+team join <team> [dir]         # add a folder to a team that is already running
 team example --recreate          # pick up config changes
 team --list                    # configs, their sessions, and what is running
 team example --colors          # show the folder -> colour mapping
