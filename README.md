@@ -187,25 +187,32 @@ all that the window is zoomed.
 
 ## Boot
 
-`install.sh` writes a single templated unit,
-`~/.config/systemd/user/tmux-team@.service`, instantiated once per config
-(`tmux-team@example`, `tmux-team@example`):
+`install.sh` writes one unit, `~/.config/systemd/user/tmux-team.service`, which
+builds every config it finds:
 
-* `Type=oneshot` + `RemainAfterExit=yes` — the unit represents "the session exists".
+* `ExecStart=tmux-team.sh --boot` — one session per config, skipping any already
+  running, and one broken config does not stop the rest.
+* `ExecStop=tmux-team.sh --stop-all` — kills the team sessions. It does not touch
+  configs; that is `close`'s job.
+* `Type=oneshot` + `RemainAfterExit=yes` — the unit represents "the teams exist".
 * `KillMode=process` — the tmux server daemonises out of the unit's main process,
-  so only that process is signalled on stop; `ExecStop` does the real teardown
-  with `tmux kill-session`.
+  so only that process is signalled on stop and `ExecStop` does the real teardown.
 * `WantedBy=default.target` — started with your user manager.
 
+There is deliberately no unit per team. A team is a config file, so adding one is
+writing a config and closing one is deleting it — neither needs systemd told
+about it, and a config can never be enabled at boot while missing, or missing
+while enabled.
+
 It also enables *lingering* for your account (`loginctl enable-linger`). Without
-lingering, the user manager only exists while you are logged in, so the session
-would be created at your first login rather than at boot. If enabling it needs
+lingering the user manager only exists while you are logged in, so teams would
+start at your first login rather than at boot. If enabling it needs
 authentication, run `sudo loginctl enable-linger $USER` yourself.
 
 ```sh
-systemctl --user status  tmux-team@example
-systemctl --user restart tmux-team@example     # rebuild from the config
-systemctl --user disable --now tmux-team@example # stop starting this one at boot
+systemctl --user status  tmux-team
+systemctl --user restart tmux-team     # rebuild whatever is missing
+team --boot                            # the same thing, by hand
 ```
 
 ## Adding a harness

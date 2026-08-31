@@ -410,12 +410,17 @@ config_dirs() {
   CONFIG_FILE="$1" read_config 2>/dev/null | cut -f2
 }
 
-# team close <team> [--no-save] [--force]: shut a team down, leaving every Claude
-# session resumable.
+# team close <team> [--force]: shut a team down and forget it.
 #
-# Claude writes its transcript as it goes, so a killed pane is usually still
-# resumable - but "usually" is not good enough for the thing the user cares most
-# about keeping, so ask each harness to exit and only then take the session down.
+# Closing removes every trace of the team: its tmux session and its config file,
+# which together are all there is - the boot service starts whatever configs are
+# present, so a deleted config simply never comes back. What it does not touch is the Claude transcripts in
+# ~/.claude/projects - those belong to the folders, not to the team, so a later
+# `team new <dir>` picks each one up again with --continue.
+#
+# Each harness is asked to /exit first and given time to go. Claude appends its
+# transcript as it goes and would usually survive a kill, but "usually" is the
+# wrong standard for the state you most want back.
 cmd_close() {
   local team='' force=0
   while (( $# )); do
@@ -432,45 +437,86 @@ cmd_close() {
   # infer from where the shell happens to be sitting.
   [[ -n $team ]] || die "usage: $(basename "$0") close <team>"
 
-  local session="$team" sid
-  [[ $session == "$SESSION_PREFIX"* ]] || session="${SESSION_PREFIX}${team}"
-  sid="$(session_id "$session")"
-  [[ -n $sid ]] || die "no running team called '$team'"
-  local name="${session#$SESSION_PREFIX}"
+  local name="${team#$SESSION_PREFIX}"
+  local session="${SESSION_PREFIX}${name}"
+  local cfg="$CONFIG_DIR/$name.conf"
+  local sid; sid="$(session_id "$session")"
 
-  if [[ -f "$CONFIG_DIR/$name.conf" ]]; then
-    echo "'team $name' will rebuild it, resuming each folder's session" >&2
-  else
-    echo "note: no config for '$name', so this lineup is not recoverable" >&2
-  fi
+  [[ -n $sid || -f $cfg ]] || die "no team called '$name'"
 
-  if (( ! force )); then
-    local pane n=0 asked=0
-    # Anything that is not a bare shell is treated as a harness worth asking.
-    # Matching on the command being exactly "claude" would miss it the moment it
-    # runs behind a wrapper, and the cost of asking a non-harness is one
-    # "command not found" line in a pane that is about to disappear.
-    while IFS= read -r pane; do
-      tmux send-keys -t "$pane" Escape 2>/dev/null || true
-      tmux send-keys -t "$pane" "/exit" C-m 2>/dev/null || true
-      asked=$(( asked + 1 ))
-    done < <(busy_panes "$sid")
+  if [[ -n $sid ]]; then
+    if (( ! force )); then
+      local pane n=0 asked=0
+      # Anything that is not a bare shell is treated as a harness worth asking.
+      # Matching on the command being exactly "claude" would miss it the moment
+      # it runs behind a wrapper, and the cost of asking a non-harness is one
+      # "command not found" line in a pane that is about to disappear.
+      while IFS= read -r pane; do
+        tmux send-keys -t "$pane" Escape 2>/dev/null || true
+        tmux send-keys -t "$pane" "/exit" C-m 2>/dev/null || true
+        asked=$(( asked + 1 ))
+      done < <(busy_panes "$sid")
 
-    if (( asked )); then
-      echo "asked $asked harness pane(s) to exit..." >&2
-      # Poll rather than sleep a fixed time: a clean exit is usually immediate,
-      # and a stuck one should not hold the close hostage either.
-      while (( n < 100 )); do
-        [[ -z $(busy_panes "$sid") ]] && break
-        sleep 0.1
-        n=$(( n + 1 ))
-      done
-      (( n < 100 )) || echo "note: a harness did not exit in 10s; closing anyway" >&2
+      if (( asked )); then
+        echo "asked $asked harness pane(s) to exit..." >&2
+        # Poll rather than sleep a fixed time: a clean exit is usually immediate,
+        # and a stuck one should not hold the close hostage either.
+        while (( n < 100 )); do
+          [[ -z $(busy_panes "$sid") ]] && break
+          sleep 0.1
+          n=$(( n + 1 ))
+        done
+        (( n < 100 )) || echo "note: a harness did not exit in 10s; closing anyway" >&2
+      fi
     fi
+    tmux kill-session -t "$sid"
+    echo "closed $session" >&2
   fi
 
-  tmux kill-session -t "$sid"
-  echo "closed $session" >&2
+  # Deleting the config is all it takes to keep the team from coming back: the
+  # boot service builds whatever configs exist, so there is no per-team unit to
+  # disable.
+  [[ -f $cfg ]] && { rm -f "$cfg"; echo "removed $cfg" >&2; }
+
+  echo "Claude sessions in those folders are untouched - 'team new <dir>' resumes them" >&2
+}
+
+# Build every config, skipping teams already up. This is what the boot service
+# runs: one unit for all teams, so adding a team is writing a config and nothing
+# else, and closing one is deleting it.
+cmd_boot() {
+  local c built=0
+  for c in $(list_configs); do
+    CONFIG_NAME="$c"
+    CONFIG_FILE="$CONFIG_DIR/$c.conf"
+    SESSION="${SESSION_PREFIX}${c}"
+    if [[ -n $(session_id "$SESSION") ]]; then
+      echo "$SESSION already running" >&2
+      continue
+    fi
+    # One broken config must not stop the rest from coming up. Trust the result,
+    # not the exit status: ensure_session runs with `set -e` suppressed here, so
+    # a failed build still returns 0 - ask tmux whether the session exists.
+    ensure_session >/dev/null || true
+    if [[ -n $(session_id "$SESSION") ]]; then
+      echo "started $SESSION" >&2
+      built=$(( built + 1 ))
+    else
+      echo "failed to start $SESSION" >&2
+    fi
+  done
+  echo "$built team(s) started" >&2
+}
+
+# Kill every team session, leaving the configs alone: this is a shutdown, not a
+# close. `team close` is the one that forgets a team.
+cmd_stop_all() {
+  local s sid
+  while IFS=$'\t' read -r s sid; do
+    [[ $s == "$SESSION_PREFIX"* ]] || continue
+    tmux kill-session -t "$sid" 2>/dev/null || true
+    echo "stopped $s" >&2
+  done < <(tmux list-sessions -F '#{session_name}	#{session_id}' 2>/dev/null || true)
 }
 
 usage() {
@@ -479,6 +525,7 @@ usage: $(basename "$0") [config] [--attach|--detached|--recreate|--colors]
        $(basename "$0") new [dir] [--name <team>] [--detached]
        $(basename "$0") join <team> [dir] [--detached]
        $(basename "$0") close <team> [--force]
+       $(basename "$0") --boot | --stop-all
        $(basename "$0") --list
        $(basename "$0") --session <name> <config>
 
@@ -493,6 +540,8 @@ case "${1:-}" in
   new)   shift; cmd_new "$@";   exit 0 ;;
   join)  shift; cmd_join "$@";  exit 0 ;;
   close) shift; cmd_close "$@"; exit 0 ;;
+  --boot)     shift; cmd_boot "$@";     exit 0 ;;
+  --stop-all) shift; cmd_stop_all "$@"; exit 0 ;;
 esac
 
 MODE=attach; CONFIG_NAME=''; SESSION_OVERRIDE=''; STYLE_WID=''
