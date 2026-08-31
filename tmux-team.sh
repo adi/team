@@ -5,7 +5,7 @@
 #   tmux-team.sh <config>           create if needed, then attach
 #   tmux-team.sh new [dir]          start a team of one from a folder
 #   tmux-team.sh join <team> [dir]  add a folder to an existing team
-#   tmux-team.sh close [team]       shut a team down, keeping sessions resumable
+#   tmux-team.sh close <team>       shut a team down, keeping sessions resumable
 #   tmux-team.sh <config> --detached   create without attaching (systemd / boot)
 #   tmux-team.sh <config> --recreate   tear the session down and rebuild it
 #   tmux-team.sh --list             list configs and whether they are running
@@ -436,7 +436,7 @@ cmd_save() {
   echo "wrote $(save_team "$sid" "$name")" >&2
 }
 
-# team close [team] [--no-save] [--force]: shut a team down, leaving every Claude
+# team close <team> [--no-save] [--force]: shut a team down, leaving every Claude
 # session resumable.
 #
 # Claude writes its transcript as it goes, so a killed pane is usually still
@@ -448,18 +448,16 @@ cmd_close() {
     case "$1" in
       --no-save)  nosave=1 ;;
       --force)    force=1 ;;
-      -h|--help)  echo "usage: $(basename "$0") close [team] [--no-save] [--force]" >&2; exit 0 ;;
+      -h|--help)  echo "usage: $(basename "$0") close <team> [--no-save] [--force]" >&2; exit 0 ;;
       -*)         die "unknown option: $1" ;;
       *)          team="$1" ;;
     esac
     shift
   done
 
-  # No name given: close the team this shell is sitting in.
-  if [[ -z $team && -n ${TMUX:-} ]]; then
-    team="$(tmux display -p '#{session_name}')"
-  fi
-  [[ -n $team ]] || die "usage: $(basename "$0") close <team>  (or run it from inside one)"
+  # Deliberately no implicit target: closing a team is not the kind of thing to
+  # infer from where the shell happens to be sitting.
+  [[ -n $team ]] || die "usage: $(basename "$0") close <team>"
 
   local session="$team" sid
   [[ $session == "$SESSION_PREFIX"* ]] || session="${SESSION_PREFIX}${team}"
@@ -508,7 +506,7 @@ usage() {
 usage: $(basename "$0") [config] [--attach|--detached|--recreate|--colors]
        $(basename "$0") new [dir] [--name <team>] [--detached]
        $(basename "$0") join <team> [dir] [--detached]
-       $(basename "$0") close [team] [--no-save] [--force]
+       $(basename "$0") close <team> [--no-save] [--force]
        $(basename "$0") save [team]
        $(basename "$0") --list
        $(basename "$0") --session <name> <config>

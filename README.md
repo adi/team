@@ -39,7 +39,8 @@ transcript. A window that opens on "No conversation found to continue" is worse
 than one that starts clean. `join` decides per folder, at the moment it writes
 the line.
 
-`close` asks every non-shell pane to `/exit` and waits for it to go — up to ten
+`close` always takes a team name — it will not infer one from the session you
+happen to be sitting in. It asks every non-shell pane to `/exit` and waits for it to go — up to ten
 seconds, then closes anyway — so each harness saves its own state rather than
 being killed mid-write. Claude appends its transcript as it goes and would
 usually survive a kill, but "usually" is the wrong standard for the thing you
@@ -93,7 +94,7 @@ team                           # pick a config from a menu, then attach
 team example                   # attach (creates the session first if it is not running)
 team new [dir]                 # write a config for a folder and start it
 team join <team> [dir]         # add a folder to a team (config + live window)
-team close [team]              # shut a team down, keeping sessions resumable
+team close <team>             # shut a team down, keeping sessions resumable
 team save [team]               # write a config from a running team
 team example --recreate          # pick up config changes
 team --list                    # configs, their sessions, and what is running
