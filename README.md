@@ -7,7 +7,7 @@ running a harness, and a status bar whose colour is derived from the folder name
 
 | file | what it is |
 |---|---|
-| `configs/<name>.conf` | the files you edit: `name \| directory \| command` per window |
+| `configs/<name>.json` | the files you edit: one entry per window (`dir`, `name`, `cmd`) |
 | `tmux-team.sh`  | builds or attaches to the session for a config |
 | `install.sh`   | installs the `team` command and the login-time service (systemd or launchd) |
 
@@ -19,7 +19,7 @@ works on it, and it survives a reboot.
 
 ```bash
 cd ~/work/api
-team new                      # writes configs/api.conf, starts team-api
+team new                      # writes configs/api.json, starts team-api
 team new ~/work/api --name b2b   # call the team something else
 team new ~/work/api --cmd 'nvim' # run something other than claude
 
@@ -58,7 +58,7 @@ never writes a config; it warns that the lineup is not recoverable and closes.
 
 ## Configs
 
-Each `configs/<name>.conf` owns a session called **`team-<name>`**. The `team-`
+Each `configs/<name>.json` owns a session called **`team-<name>`**. The `team-`
 prefix keeps these clear of the per-project sessions you run outside this tool —
 without it a config named `api` would collide with an existing `api`
 session. Change `SESSION_PREFIX` at the top of `tmux-team.sh` (or set
@@ -68,14 +68,27 @@ fnmatch metacharacters in tmux targets and glob characters in your shell.
 `configs/` starts empty and stays out of git — a config names the folders you
 work in. Write one by hand, or let `team new` and `team join` write it for you:
 
+```json
+{
+  "windows": [
+    { "name": "api", "dir": "~/work/api", "cmd": "claude --continue" },
+    { "dir": "~/work/web" },
+    { "name": "notes", "dir": "~/notes", "cmd": "nvim" }
+  ]
+}
 ```
-# api: the api stack.
-#   name | directory | command
 
-api            | ~/work/api            | claude --continue
-web            | ~/work/web            | claude --continue
-notes          | ~/notes               | nvim
-```
+| field | |
+|---|---|
+| `dir` | required; `~` is expanded, and a glob becomes one window per match |
+| `name` | optional, defaults to the folder's name; `"*"` means the same and is the useful spelling for a glob |
+| `cmd` | optional; absent or `""` opens the window with no command |
+
+Reading and writing go through `python3`, not `jq` — python3 is present by
+default on macOS and Ubuntu where jq is not, and it escapes strings correctly
+when writing, so a path or command containing a quote cannot produce a config
+the tool fails to read back. A malformed config is reported and skipped rather
+than taking the rest of the boot down with it.
 
 ### Globs
 
@@ -135,7 +148,7 @@ colour, on any machine, across reboots.
 
 ## Windows
 
-`windows.conf` entries are validated — a line pointing at a missing directory is
+`windows` entries are validated — a line pointing at a missing directory is
 skipped with a warning rather than aborting the session. Commands are *typed into
 the window's shell* rather than exec'd, so quitting the harness (or its crashing)
 leaves you with a usable shell in the right directory instead of a dead window.

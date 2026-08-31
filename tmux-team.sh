@@ -10,7 +10,7 @@
 #   tmux-team.sh --list             list configs and whether they are running
 #   tmux-team.sh [config] --colors  print the folder -> colour mapping
 #
-# Configs live in configs/<name>.conf and each one owns a session called
+# Configs live in configs/<name>.json and each one owns a session called
 # "team-<name>", so these never collide with the per-project sessions you keep
 # outside this tool. Every tmux command targets the session by *id* ($0, $1, ...)
 # because tmux resolves a name target by prefix and pattern.
@@ -59,9 +59,9 @@ trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[
 
 list_configs() {
   local f
-  for f in "$CONFIG_DIR"/*.conf; do
+  for f in "$CONFIG_DIR"/*.json; do
     [[ -e $f ]] || continue
-    basename "$f" .conf
+    basename "$f" .json
   done
 }
 
@@ -71,7 +71,7 @@ list_unconfigured() {
   while IFS= read -r name; do
     [[ $name == "$SESSION_PREFIX"* ]] || continue
     name="${name#$SESSION_PREFIX}"
-    [[ -f "$CONFIG_DIR/$name.conf" ]] || printf '%s\n' "$name"
+    [[ -f "$CONFIG_DIR/$name.json" ]] || printf '%s\n' "$name"
   done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null)
 }
 
@@ -85,83 +85,91 @@ session_id() {
     | awk -F'\t' -v n="$1" '$1 == n { print $2; exit }'; } || true
 }
 
+# --------------------------------------------------------------- config file --
+# A config is JSON: { "windows": [ { "name":…, "dir":…, "cmd":… }, … ] }.
+#
+#   dir   required; ~ is expanded, and a glob becomes one window per match
+#   name  optional, defaults to the folder's name; "*" means the same thing and
+#         is the useful spelling for a glob
+#   cmd   optional; absent or "" opens the window with no command
+#
+# Parsing and writing both go through python3 rather than jq: python3 is present
+# by default on macOS and Ubuntu where jq is not, and it escapes strings
+# correctly when writing - a path or command with a quote in it would otherwise
+# produce a config the tool cannot read back.
+config_py() {
+  python3 - "$@" <<'PYEOF'
+import glob, json, os, sys
+
+def load(path):
+    with open(path) as fh:
+        doc = json.load(fh)
+    if isinstance(doc, list):          # a bare array of windows is fine too
+        doc = {"windows": doc}
+    if not isinstance(doc, dict) or not isinstance(doc.get("windows"), list):
+        raise ValueError('expected {"windows": [ ... ]}')
+    return doc
+
+def emit(path):
+    """Print name<TAB>dir<TAB>cmd per usable window; warn about the rest."""
+    try:
+        doc = load(path)
+    except (OSError, ValueError, json.JSONDecodeError) as e:
+        print(f"skip: {os.path.basename(path)}: {e}", file=sys.stderr)
+        return 1
+    for w in doc["windows"]:
+        if not isinstance(w, dict) or not w.get("dir"):
+            print(f"skip: window with no dir: {w!r}", file=sys.stderr)
+            continue
+        raw = os.path.expanduser(str(w["dir"]))
+        name = str(w.get("name") or "*")
+        cmd = str(w.get("cmd") or "")
+        if any(c in raw for c in "*?["):
+            matches = sorted(d.rstrip("/") for d in glob.glob(raw) if os.path.isdir(d))
+            if not matches:
+                print(f"skip: '{name}' -> nothing matches: {raw}", file=sys.stderr)
+                continue
+            for m in matches:
+                print("\t".join([os.path.basename(m) if name == "*" else name, m, cmd]))
+            continue
+        raw = raw.rstrip("/") or "/"
+        if not os.path.isdir(raw):
+            print(f"skip: '{name}' -> no such directory: {raw}", file=sys.stderr)
+            continue
+        print("\t".join([os.path.basename(raw) if name == "*" else name, raw, cmd]))
+    return 0
+
+def window(d, cmd):
+    home = os.path.expanduser("~")
+    short = "~" + d[len(home):] if d == home or d.startswith(home + os.sep) else d
+    w = {"name": os.path.basename(d), "dir": short}
+    if cmd:
+        w["cmd"] = cmd
+    return w
+
+def write(path, doc):
+    with open(path, "w") as fh:
+        json.dump(doc, fh, indent=2)
+        fh.write("\n")
+
+mode = sys.argv[1]
+if mode == "read":
+    sys.exit(emit(sys.argv[2]))
+elif mode == "create":
+    write(sys.argv[2], {"windows": [window(sys.argv[3], sys.argv[4])]})
+elif mode == "append":
+    doc = load(sys.argv[2])
+    doc["windows"].append(window(sys.argv[3], sys.argv[4]))
+    write(sys.argv[2], doc)
+else:
+    print(f"unknown mode: {mode}", file=sys.stderr)
+    sys.exit(2)
+PYEOF
+}
+
 # Emits "name<TAB>dir<TAB>command" per usable window; warns about the rest.
 read_config() {
-  local line name dir cmd
-  while IFS= read -r line || [[ -n $line ]]; do
-    line="${line%%#*}"
-    [[ -n ${line//[[:space:]]/} ]] || continue
-
-    IFS='|' read -r name dir cmd <<<"$line"
-    name="$(trim "${name:-}")"; dir="$(trim "${dir:-}")"; cmd="$(trim "${cmd:-}")"
-    [[ $cmd == '-' ]] && cmd=''
-    dir="${dir/#\~/$HOME}"
-
-    if [[ -z $name || -z $dir ]]; then
-      echo "skip: malformed line: $line" >&2; continue
-    fi
-
-    # A glob in the directory field becomes one window per matching directory,
-    # so a config can track a tree instead of freezing today's contents. A name
-    # of "*" means "use the folder's own name".
-    if [[ $dir == *[*?[]* ]]; then
-      local -a matches=(); local m wname had_nullglob
-      shopt -q nullglob && had_nullglob=1 || had_nullglob=0
-      shopt -s nullglob
-      matches=( $dir )
-      (( had_nullglob )) || shopt -u nullglob
-      if (( ${#matches[@]} == 0 )); then
-        echo "skip: '$name' -> nothing matches: $dir" >&2; continue
-      fi
-      for m in "${matches[@]}"; do
-        m="${m%/}"
-        [[ -d $m ]] || continue
-        wname="$name"
-        [[ $wname == '*' ]] && wname="$(basename "$m")"
-        printf '%s\t%s\t%s\n' "$wname" "$m" "$cmd"
-      done
-      continue
-    fi
-
-    if [[ ! -d $dir ]]; then
-      echo "skip: '$name' -> no such directory: $dir" >&2; continue
-    fi
-    printf '%s\t%s\t%s\n' "$name" "$dir" "$cmd"
-  done <"$CONFIG_FILE"
-}
-
-# has_claude_session <dir>: true if Claude Code has a resumable *interactive*
-# session for <dir> - a *.jsonl transcript under ~/.claude/projects/<munged
-# path>, where every non-alphanumeric path character becomes '-'.
-#
-# File presence alone is not enough: a folder can hold transcripts from one-shot
-# -p/SDK runs ("entrypoint":"sdk-cli") which `--continue` refuses to resume
-# ("No conversation found to continue"), so require one real interactive
-# transcript. Getting this wrong hands the user a dead window.
-has_claude_session() {
-  local slug=${1//[^a-zA-Z0-9]/-} f
-  for f in "$HOME/.claude/projects/$slug"/*.jsonl; do
-    [[ -e $f ]] || continue
-    grep -q '"entrypoint":"cli"' "$f" && return 0
-  done
-  return 1
-}
-
-# claude_cmd <dir> -> the command to type in a window for <dir>.
-claude_cmd() {
-  if has_claude_session "$1"; then printf 'claude --continue'; else printf 'claude'; fi
-}
-
-# Add one window for <dir> to session <sid>, running <command> - or claude,
-# resuming where it can, when none is given.
-add_window() {
-  local sid="$1" dir="$2" cmd="${3:-}" wid
-  [[ -n $cmd ]] || cmd="$(claude_cmd "$dir")"
-  wid=$(tmux new-window -t "$sid:" -n "$(basename "$dir")" -c "$dir" -P -F '#{window_id}')
-  style_window "$wid"
-  wait_for_prompt "$wid"
-  tmux send-keys -t "$wid" "$cmd" C-m
-  printf '%s\n' "$wid"
+  config_py read "$CONFIG_FILE"
 }
 
 # Poll until the pane has drawn its prompt, max ~3s.
@@ -279,7 +287,7 @@ show_list() {
         "$(tmux list-windows -t "$sid" -F '#{window_name}' | paste -sd, -)"
     else
       printf '%-16s %-18s %-9s %s\n' "$c" "${SESSION_PREFIX}${c}" - \
-        "$(CONFIG_FILE="$CONFIG_DIR/$c.conf" read_config 2>/dev/null | cut -f1 | paste -sd, -)"
+        "$(CONFIG_FILE="$CONFIG_DIR/$c.json" read_config 2>/dev/null | cut -f1 | paste -sd, -)"
     fi
   done
 
@@ -288,7 +296,7 @@ show_list() {
   while IFS=$'\t' read -r s sid; do
     [[ $s == "$SESSION_PREFIX"* ]] || continue
     c="${s#$SESSION_PREFIX}"
-    [[ -f "$CONFIG_DIR/$c.conf" ]] && continue
+    [[ -f "$CONFIG_DIR/$c.json" ]] && continue
     printf '%-16s %-18s %-9s %s\n' "(no config)" "$s" running \
       "$(tmux list-windows -t "$sid" -F '#{window_name}' | paste -sd, -)"
   done < <(tmux list-sessions -F '#{session_name}	#{session_id}' 2>/dev/null)
@@ -316,7 +324,7 @@ pick_config() {
 
 # team new [dir] [--name <team>] [--cmd <command>]: start a team from one folder.
 #
-# This writes configs/<name>.conf and then builds it through the same path as any
+# This writes configs/<name>.json and then builds it through the same path as any
 # other team. Teams used to exist as tmux state alone, which made them a second
 # class the rest of the tool had to special-case; a team is a config, full stop.
 cmd_new() {
@@ -332,11 +340,10 @@ cmd_new() {
     shift
   done
 
-  [[ -z $cmd ]] || check_cmd "$cmd"
   dir="$(cd "${dir:-$PWD}" 2>/dev/null && pwd)" || die "no such directory: ${dir:-$PWD}"
   name="${name:-$(basename "$dir")}"
   CONFIG_NAME="$name"
-  CONFIG_FILE="$CONFIG_DIR/$name.conf"
+  CONFIG_FILE="$CONFIG_DIR/$name.json"
   SESSION="${SESSION_PREFIX}${name}"
 
   [[ -z $(session_id "$SESSION") ]] \
@@ -344,7 +351,11 @@ cmd_new() {
   [[ ! -f $CONFIG_FILE ]] \
     || die "config '$name' already exists - 'team $name' to start it, or pass --name for a different team"
 
-  { config_header "$name" new; config_line "$dir" "$cmd"; } >"$CONFIG_FILE"
+  # With no --cmd, record what this folder should run: claude, resuming its
+  # session when there is one. Deciding here rather than at build time is what
+  # keeps a config honest about what it starts.
+  [[ -n $cmd ]] || cmd="$(claude_cmd "$dir")"
+  config_py create "$CONFIG_FILE" "$dir" "$cmd"
   echo "wrote $CONFIG_FILE" >&2
 
   attach "$(ensure_session)"
@@ -367,12 +378,11 @@ cmd_join() {
   done
 
   [[ -n $team ]] || die "usage: $(basename "$0") join <team> [dir]"
-  [[ -z $cmd ]] || check_cmd "$cmd"
   dir="$(cd "${dir:-$PWD}" 2>/dev/null && pwd)" || die "no such directory: ${dir:-$PWD}"
 
   local name="${team#$SESSION_PREFIX}"
   CONFIG_NAME="$name"
-  CONFIG_FILE="$CONFIG_DIR/$name.conf"
+  CONFIG_FILE="$CONFIG_DIR/$name.json"
   SESSION="${SESSION_PREFIX}${name}"
   local sid; sid="$(session_id "$SESSION")"
 
@@ -387,7 +397,8 @@ cmd_join() {
   # Two windows on one folder would both --continue the same transcript.
   grep -Fxq "$dir" <(config_dirs "$CONFIG_FILE") \
     && die "$dir is already in team '$name'"
-  config_line "$dir" "$cmd" >>"$CONFIG_FILE"
+  [[ -n $cmd ]] || cmd="$(claude_cmd "$dir")"
+  config_py append "$CONFIG_FILE" "$dir" "$cmd"
   echo "added $(basename "$dir") to $CONFIG_FILE" >&2
 
   if [[ -z $sid ]]; then
@@ -407,27 +418,36 @@ busy_panes() {
 }
 
 # One line of a config file: "name | dir | command", ~ kept short.
-# A config line is "name | dir | command" and # starts a comment, so a command
-# containing either character would be silently truncated or mis-split. Refuse it
-# rather than writing a config that does not say what was asked for.
-check_cmd() {
-  case "$1" in
-    *'|'*) die "--cmd cannot contain '|': config lines are pipe-delimited" ;;
-    *'#'*) die "--cmd cannot contain '#': the config treats it as a comment" ;;
-  esac
+# has_claude_session <dir>: true if Claude Code has a resumable *interactive*
+# session for <dir> - a *.jsonl transcript under ~/.claude/projects/<munged
+# path>, where every non-alphanumeric path character becomes '-'.
+#
+# File presence alone is not enough: a folder can hold transcripts from one-shot
+# -p/SDK runs ("entrypoint":"sdk-cli") which `--continue` refuses to resume
+# ("No conversation found to continue"), so require one real interactive
+# transcript. Getting this wrong hands the user a dead window.
+has_claude_session() {
+  local slug=${1//[^a-zA-Z0-9]/-} f
+  for f in "$HOME/.claude/projects/$slug"/*.jsonl; do
+    [[ -e $f ]] || continue
+    grep -q '"entrypoint":"cli"' "$f" && return 0
+  done
+  return 1
 }
-
-# config_line <dir> [command] - the command defaults to claude, resuming that
-# folder's session when there is one to resume.
-config_line() {
-  local dir="$1" cmd="${2:-}"
+# claude_cmd <dir> -> the command to type in a window for <dir>.
+claude_cmd() {
+  if has_claude_session "$1"; then printf 'claude --continue'; else printf 'claude'; fi
+}
+# Add one window for <dir> to session <sid>, running <command> - or claude,
+# resuming where it can, when none is given.
+add_window() {
+  local sid="$1" dir="$2" cmd="${3:-}" wid
   [[ -n $cmd ]] || cmd="$(claude_cmd "$dir")"
-  printf '%-14s | %-34s | %s\n' "$(basename "$dir")" "${dir/#$HOME/\~}" "$cmd"
-}
-
-config_header() {
-  printf '# %s: written by `team %s` on %s.\n' "$1" "$2" "$(date +%Y-%m-%d)"
-  printf '#   name | directory | command\n\n'
+  wid=$(tmux new-window -t "$sid:" -n "$(basename "$dir")" -c "$dir" -P -F '#{window_id}')
+  style_window "$wid"
+  wait_for_prompt "$wid"
+  tmux send-keys -t "$wid" "$cmd" C-m
+  printf '%s\n' "$wid"
 }
 
 # Directories a config already lists, one per line.
@@ -465,7 +485,7 @@ cmd_close() {
 
   local name="${team#$SESSION_PREFIX}"
   local session="${SESSION_PREFIX}${name}"
-  local cfg="$CONFIG_DIR/$name.conf"
+  local cfg="$CONFIG_DIR/$name.json"
   local sid; sid="$(session_id "$session")"
 
   [[ -n $sid || -f $cfg ]] || die "no team called '$name'"
@@ -518,7 +538,7 @@ cmd_boot() {
   local c built=0
   for c in $(list_configs); do
     CONFIG_NAME="$c"
-    CONFIG_FILE="$CONFIG_DIR/$c.conf"
+    CONFIG_FILE="$CONFIG_DIR/$c.json"
     SESSION="${SESSION_PREFIX}${c}"
     if [[ -n $(session_id "$SESSION") ]]; then
       echo "$SESSION already running" >&2
@@ -595,7 +615,7 @@ if [[ $MODE == style-window ]]; then
 fi
 
 [[ -n $CONFIG_NAME ]] || CONFIG_NAME="$(pick_config)"
-CONFIG_FILE="$CONFIG_DIR/$CONFIG_NAME.conf"
+CONFIG_FILE="$CONFIG_DIR/$CONFIG_NAME.json"
 SESSION="${SESSION_OVERRIDE:-${SESSION_PREFIX}${CONFIG_NAME}}"
 
 # `new` and `join` keep a config for every team they touch, but a running

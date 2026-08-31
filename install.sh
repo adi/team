@@ -44,6 +44,47 @@ case ":$PATH:" in
     ;;
 esac
 
+# Configs used to be pipe-delimited text. Convert any that are still around;
+# the original is kept as <name>.conf.bak rather than deleted, since a config is
+# not reproducible from anything else once it is gone.
+CFG_DIR="${TMUX_TEAM_CONFIG_DIR:-$HERE/configs}"
+if compgen -G "$CFG_DIR/*.conf" >/dev/null 2>&1; then
+  for old in "$CFG_DIR"/*.conf; do
+    new="${old%.conf}.json"
+    if [[ -e $new ]]; then
+      echo "skip: $(basename "$new") already exists, leaving $(basename "$old") alone"
+      continue
+    fi
+    python3 - "$old" "$new" <<'PYEOF'
+import json, os, sys
+src, dst = sys.argv[1], sys.argv[2]
+windows = []
+for line in open(src):
+    line = line.split("#", 1)[0].strip()
+    if not line:
+        continue
+    parts = [p.strip() for p in line.split("|")]
+    name, dirpath = (parts + ["", ""])[:2]
+    cmd = parts[2] if len(parts) > 2 else ""
+    if cmd == "-":
+        cmd = ""
+    if not name or not dirpath:
+        print(f"  skip malformed line: {line}", file=sys.stderr)
+        continue
+    w = {"name": name, "dir": dirpath}
+    if cmd:
+        w["cmd"] = cmd
+    windows.append(w)
+with open(dst, "w") as fh:
+    json.dump({"windows": windows}, fh, indent=2)
+    fh.write("\n")
+print(f"  {len(windows)} window(s)")
+PYEOF
+    mv "$old" "$old.bak"
+    echo "migrated $(basename "$old") -> $(basename "$new") (kept $(basename "$old").bak)"
+  done
+fi
+
 # One service builds every config. A team is a config file, so adding a team is
 # writing one and closing a team is deleting it - neither tells the init system
 # anything, and a config can never be enabled while missing or missing while
