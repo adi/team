@@ -238,6 +238,14 @@ Either way, `team --boot` does the same thing by hand.
 Runs on Linux and macOS. Requirements are tmux, bash, and whatever harness your
 configs name.
 
+* **Your shell does not matter.** Both scripts declare `#!/usr/bin/env bash` and
+  run under bash whichever shell you use — zsh on macOS, bash, fish. What your
+  shell affects is where the `PATH` line goes, and `install.sh` names the right
+  file for it (`~/.zshrc`, `~/.bashrc`, or `fish_add_path`).
+* **Windows run your login shell**, so panes on a Mac are zsh. `close` decides
+  what to ask to `/exit` by skipping anything that *is* a shell — bash, zsh, sh,
+  fish, dash — so a zsh pane is left to the session teardown and only a real
+  harness is asked to quit.
 * **Stock macOS bash is 3.2**, so nothing here uses bash 4 features — no
   `mapfile`, no associative arrays.
 * **`readlink -f` is GNU-only.** The script resolves its own symlink by hand, so

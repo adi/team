@@ -27,9 +27,21 @@ command -v tmux >/dev/null || echo "warning: tmux not found (brew install tmux)"
 mkdir -p "$BIN_DIR"
 ln -sfn "$HERE/tmux-team.sh" "$BIN_DIR/team"
 echo "installed $BIN_DIR/team -> $HERE/tmux-team.sh"
+# The note has to name the right file: on macOS the login shell is zsh, so
+# pointing a Mac user at ~/.bashrc is advice that silently does nothing.
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
-  *) echo "note: $BIN_DIR is not on your PATH; add it to run 'team' by name" >&2 ;;
+  *)
+    echo "note: $BIN_DIR is not on your PATH, so 'team' will not resolve by name." >&2
+    case "$(basename "${SHELL:-bash}")" in
+      zsh)
+        echo "  add to ~/.zshrc:  export PATH=\"\$HOME/.local/bin:\$PATH\"" >&2 ;;
+      fish)
+        echo "  run once:  fish_add_path \"\$HOME/.local/bin\"" >&2 ;;
+      *)
+        echo "  add to ~/.bashrc: export PATH=\"\$HOME/.local/bin:\$PATH\"" >&2 ;;
+    esac
+    ;;
 esac
 
 # One service builds every config. A team is a config file, so adding a team is
