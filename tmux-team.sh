@@ -53,8 +53,8 @@ list_configs() {
   done
 }
 
-# Names of running teams that have no config file behind them.
-list_adhoc() {
+# Running team- sessions with no config file behind them.
+list_unconfigured() {
   local name
   while IFS= read -r name; do
     [[ $name == "$SESSION_PREFIX"* ]] || continue
@@ -269,13 +269,13 @@ show_list() {
     fi
   done
 
-  # A running team whose config is gone (deleted, or built with --session) would
-  # otherwise be invisible here. Closing it writes the config back.
+  # A team- session the tool cannot explain - config deleted, made by hand, or
+  # built with --session - should be visible rather than hidden.
   while IFS=$'\t' read -r s sid; do
     [[ $s == "$SESSION_PREFIX"* ]] || continue
     c="${s#$SESSION_PREFIX}"
     [[ -f "$CONFIG_DIR/$c.conf" ]] && continue
-    printf '%-16s %-18s %-9s %s\n' "(unsaved)" "$s" running \
+    printf '%-16s %-18s %-9s %s\n' "(no config)" "$s" running \
       "$(tmux list-windows -t "$sid" -F '#{window_name}' | paste -sd, -)"
   done < <(tmux list-sessions -F '#{session_name}	#{session_id}' 2>/dev/null)
 }
@@ -283,7 +283,7 @@ show_list() {
 # Ask which config to load, when none was named on the command line.
 pick_config() {
   local -a cfgs=(); local c n reply
-  mapfile -t cfgs < <(list_configs; list_adhoc)
+  mapfile -t cfgs < <(list_configs; list_unconfigured)
   (( ${#cfgs[@]} )) || die "no configs in $CONFIG_DIR and no teams running"
   if (( ${#cfgs[@]} == 1 )); then printf '%s\n' "${cfgs[0]}"; return; fi
   [[ -t 0 && -t 2 ]] || die "no config given; choose one of: ${cfgs[*]}"
@@ -363,11 +363,12 @@ cmd_join() {
   SESSION="${SESSION_PREFIX}${name}"
   local sid; sid="$(session_id "$SESSION")"
 
-  # A session with no config predates this behaviour; capture what it is running
-  # before appending, so nothing already in the team is lost.
   if [[ ! -f $CONFIG_FILE ]]; then
-    [[ -n $sid ]] || die "no team called '$name' - 'team new $dir --name $name' to start one"
-    echo "saved the running lineup to $(save_team "$sid" "$name")" >&2
+    [[ -z $sid ]] \
+      && die "no team called '$name' - 'team new $dir --name $name' to start one"
+    # A team- session the tool did not create (made by hand, or via --session):
+    # appending to a config it has no idea about would invent a lineup.
+    die "'$name' is running but has no config; the tool cannot tell what is in it"
   fi
 
   # Two windows on one folder would both --continue the same transcript.
@@ -409,23 +410,6 @@ config_dirs() {
   CONFIG_FILE="$1" read_config 2>/dev/null | cut -f2
 }
 
-# Write a config file from a team's live windows, so a team that somehow has no
-# config - its file deleted, or a session built with --session - still survives
-# being closed. `new` and `join` keep the config current, so this is a fallback. The harness command is decided per folder the same way `new`
-# does it, rather than frozen as --continue: a folder whose transcript is not
-# resumable would otherwise reopen straight onto "No conversation found".
-save_team() {
-  local sid="$1" name="$2" dest="$CONFIG_DIR/$name.conf" dir
-  {
-    printf '# %s: saved from the running team on %s.\n' "$name" "$(date +%Y-%m-%d)"
-    printf '#   name | directory | command\n\n'
-    while IFS=$'\t' read -r wname dir; do
-      printf '%-14s | %-34s | %s\n' "$wname" "${dir/#$HOME/\~}" "$(claude_cmd "$dir")"
-    done < <(tmux list-windows -t "$sid" -F '#{window_name}	#{pane_current_path}')
-  } >"$dest"
-  printf '%s\n' "$dest"
-}
-
 # team close <team> [--no-save] [--force]: shut a team down, leaving every Claude
 # session resumable.
 #
@@ -433,12 +417,11 @@ save_team() {
 # resumable - but "usually" is not good enough for the thing the user cares most
 # about keeping, so ask each harness to exit and only then take the session down.
 cmd_close() {
-  local team='' nosave=0 force=0
+  local team='' force=0
   while (( $# )); do
     case "$1" in
-      --no-save)  nosave=1 ;;
       --force)    force=1 ;;
-      -h|--help)  echo "usage: $(basename "$0") close <team> [--no-save] [--force]" >&2; exit 0 ;;
+      -h|--help)  echo "usage: $(basename "$0") close <team> [--force]" >&2; exit 0 ;;
       -*)         die "unknown option: $1" ;;
       *)          team="$1" ;;
     esac
@@ -455,12 +438,11 @@ cmd_close() {
   [[ -n $sid ]] || die "no running team called '$team'"
   local name="${session#$SESSION_PREFIX}"
 
-  # Teams written by `new`/`join` already have a config; this catches a session
-  # that predates that, or one made with --session.
-  if (( ! nosave )) && [[ ! -f "$CONFIG_DIR/$name.conf" ]]; then
-    echo "saved lineup to $(save_team "$sid" "$name")" >&2
+  if [[ -f "$CONFIG_DIR/$name.conf" ]]; then
+    echo "'team $name' will rebuild it, resuming each folder's session" >&2
+  else
+    echo "note: no config for '$name', so this lineup is not recoverable" >&2
   fi
-  echo "'team $name' will rebuild it, resuming each folder's session" >&2
 
   if (( ! force )); then
     local pane n=0 asked=0
@@ -496,7 +478,7 @@ usage() {
 usage: $(basename "$0") [config] [--attach|--detached|--recreate|--colors]
        $(basename "$0") new [dir] [--name <team>] [--detached]
        $(basename "$0") join <team> [dir] [--detached]
-       $(basename "$0") close <team> [--no-save] [--force]
+       $(basename "$0") close <team> [--force]
        $(basename "$0") --list
        $(basename "$0") --session <name> <config>
 
@@ -540,18 +522,19 @@ fi
 CONFIG_FILE="$CONFIG_DIR/$CONFIG_NAME.conf"
 SESSION="${SESSION_OVERRIDE:-${SESSION_PREFIX}${CONFIG_NAME}}"
 
-# A team built with `new` has no config file, but it is still a team: reaching it
-# by name is the whole point of naming it. Only the modes that rebuild from a
-# config need one.
+# `new` and `join` keep a config for every team they touch, but a running
+# team- session can still have none: its config deleted, made by hand, or built
+# with --session. Attaching to it by name should work anyway; only the modes that
+# rebuild from a config need one.
 if [[ ! -f $CONFIG_FILE ]]; then
-  adhoc_sid="$(session_id "$SESSION")"
-  if [[ -z $adhoc_sid ]]; then
+  orphan_sid="$(session_id "$SESSION")"
+  if [[ -z $orphan_sid ]]; then
     die "no such config or running team: $CONFIG_NAME" \
         "(configs: $(list_configs | paste -sd' ' -)" \
-        "| running: $(list_adhoc | paste -sd' ' -))"
+        "| running: $(list_unconfigured | paste -sd' ' -))"
   fi
   case "$MODE" in
-    attach)   attach "$adhoc_sid"; exit 0 ;;
+    attach)   attach "$orphan_sid"; exit 0 ;;
     detached) exit 0 ;;   # asked for it running; it is
     *)        die "team '$CONFIG_NAME' has no config file, and --$MODE rebuilds from one" ;;
   esac

@@ -43,12 +43,16 @@ happen to be sitting in. It asks every non-shell pane to `/exit` and waits for i
 seconds, then closes anyway — so each harness saves its own state rather than
 being killed mid-write. Claude appends its transcript as it goes and would
 usually survive a kill, but "usually" is the wrong standard for the thing you
-most want back. `--force` skips the asking; `--no-save` skips writing a config
-for a team that has none.
+most want back. `--force` skips the asking.
 
 `join` refuses a folder already in the team — two windows would both `--continue`
-the same transcript. A running team whose config you delete shows as `(unsaved)` in
-`--list`; closing it writes the config back.
+the same transcript.
+
+A `team-` session the tool cannot explain — its config deleted, or a session you
+made by hand — shows as `(no config)` in `--list`. It can be attached and closed,
+but not joined: without a config there is nothing that says what the team is, and
+guessing from the live windows would invent a lineup you never wrote. `close`
+never writes a config; it warns that the lineup is not recoverable and closes.
 
 ## Configs
 
