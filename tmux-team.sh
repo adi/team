@@ -6,6 +6,7 @@
 #   tmux-team.sh new [dir]          start a team of one from a folder
 #   tmux-team.sh join <team> [dir]  add a folder to an existing team
 #                                   both take --cmd to run something other than claude
+#   tmux-team.sh remove <team> <name>  drop one window from a team
 #   tmux-team.sh close <team>       shut a team down, keeping sessions resumable
 #   tmux-team.sh --list             list configs and whether they are running
 #   tmux-team.sh [config] --colors  print the folder -> colour mapping
@@ -161,6 +162,30 @@ elif mode == "append":
     doc = load(sys.argv[2])
     doc["windows"].append(window(sys.argv[3], sys.argv[4]))
     write(sys.argv[2], doc)
+elif mode in ("remove", "check_remove"):
+    # Match a literal entry only: a window that came from a glob has no entry of
+    # its own, and dropping the glob would take its siblings with it.
+    #
+    # check_remove answers the same question without writing, so the caller can
+    # refuse before it asks a harness to quit. Exit 1: nothing matched. Exit 2:
+    # that is the only window.
+    path, target = sys.argv[2], sys.argv[3]
+    doc = load(path)
+    keep, dropped = [], 0
+    for w in doc["windows"]:
+        d = os.path.expanduser(str(w.get("dir", "")))
+        name = str(w.get("name") or os.path.basename(d.rstrip("/")))
+        if name == target and not any(c in d for c in "*?["):
+            dropped += 1
+            continue
+        keep.append(w)
+    if not dropped:
+        sys.exit(1)
+    if not keep:
+        sys.exit(2)
+    if mode == "remove":
+        doc["windows"] = keep
+        write(path, doc)
 else:
     print(f"unknown mode: {mode}", file=sys.stderr)
     sys.exit(2)
@@ -411,13 +436,15 @@ cmd_join() {
   attach "$sid"
 }
 
-# Panes running something other than a login shell - i.e. a live harness.
+# busy_panes <list-panes target args>: panes running something other than a
+# login shell - i.e. a live harness. The caller passes the scope, because both
+# `-s -t <session>` and `-t <window>` are wanted and `-s` with a window id would
+# quietly widen back to the whole session.
 busy_panes() {
-  { tmux list-panes -s -t "$1" -F '#{pane_id} #{pane_current_command}' 2>/dev/null \
+  { tmux list-panes "$@" -F '#{pane_id} #{pane_current_command}' 2>/dev/null \
     | awk '$2 != "bash" && $2 != "zsh" && $2 != "sh" && $2 != "fish" && $2 != "dash" { print $1 }'; } || true
 }
 
-# One line of a config file: "name | dir | command", ~ kept short.
 # has_claude_session <dir>: true if Claude Code has a resumable *interactive*
 # session for <dir> - a *.jsonl transcript under ~/.claude/projects/<munged
 # path>, where every non-alphanumeric path character becomes '-'.
@@ -454,6 +481,72 @@ add_window() {
 config_dirs() {
   [[ -f $1 ]] || return 0
   CONFIG_FILE="$1" read_config 2>/dev/null | cut -f2
+}
+
+# team remove <team> <name> [--force]: drop one window from a team.
+#
+# The entry goes out of the config and the live window is closed, harness first.
+# A team's last window is refused - a config with no windows builds nothing, so
+# that is `close` wearing a different name.
+cmd_remove() {
+  local team='' target='' force=0
+  while (( $# )); do
+    case "$1" in
+      --force)    force=1 ;;
+      -h|--help)  echo "usage: $(basename "$0") remove <team> <name> [--force]" >&2; exit 0 ;;
+      -*)         die "unknown option: $1" ;;
+      *)          if [[ -z $team ]]; then team="$1"; else target="$1"; fi ;;
+    esac
+    shift
+  done
+  [[ -n $team && -n $target ]] || die "usage: $(basename "$0") remove <team> <name>"
+
+  local name="${team#$SESSION_PREFIX}"
+  CONFIG_NAME="$name"
+  CONFIG_FILE="$CONFIG_DIR/$name.json"
+  SESSION="${SESSION_PREFIX}${name}"
+  [[ -f $CONFIG_FILE ]] || die "no team called '$name'"
+
+  local sid; sid="$(session_id "$SESSION")"
+
+  # Ask what would happen before doing anything: refusing after having told a
+  # harness to quit would cost the user a session for nothing.
+  local rc=0
+  config_py check_remove "$CONFIG_FILE" "$target" || rc=$?
+  if (( rc == 1 )); then
+    if read_config 2>/dev/null | cut -f1 | grep -Fxq "$target"; then
+      die "'$target' comes from a glob entry, which covers several folders;" \
+          "edit $CONFIG_FILE to narrow or drop that entry"
+    fi
+    die "no window called '$target' in team '$name'" \
+        "(have: $(read_config 2>/dev/null | cut -f1 | paste -sd' ' -))"
+  fi
+  (( rc == 2 )) && die "'$target' is the team's only window - 'team close $name' instead"
+
+  local wid=''
+  if [[ -n $sid ]]; then
+    wid="$(tmux list-windows -t "$sid" -F '#{window_id} #{window_name}' 2>/dev/null \
+           | awk -v n="$target" '$2 == n { print $1; exit }' || true)"
+  fi
+  if [[ -n $wid ]] && (( ! force )); then
+    local pane n=0
+    while IFS= read -r pane; do
+      tmux send-keys -t "$pane" Escape 2>/dev/null || true
+      tmux send-keys -t "$pane" "/exit" C-m 2>/dev/null || true
+    done < <(busy_panes -t "$wid")
+    while (( n < 100 )); do
+      [[ -z $(busy_panes -t "$wid") ]] && break
+      sleep 0.1
+      n=$(( n + 1 ))
+    done
+    (( n < 100 )) || echo "note: the harness did not exit in 10s; closing anyway" >&2
+  fi
+
+  config_py remove "$CONFIG_FILE" "$target"
+  [[ -z $wid ]] || tmux kill-window -t "$wid"
+  echo "removed '$target' from $CONFIG_FILE" >&2
+  [[ -n $wid ]] && echo "closed its window" >&2
+  return 0
 }
 
 # team close <team> [--force]: shut a team down and forget it.
@@ -501,14 +594,14 @@ cmd_close() {
         tmux send-keys -t "$pane" Escape 2>/dev/null || true
         tmux send-keys -t "$pane" "/exit" C-m 2>/dev/null || true
         asked=$(( asked + 1 ))
-      done < <(busy_panes "$sid")
+      done < <(busy_panes -s -t "$sid")
 
       if (( asked )); then
         echo "asked $asked harness pane(s) to exit..." >&2
         # Poll rather than sleep a fixed time: a clean exit is usually immediate,
         # and a stuck one should not hold the close hostage either.
         while (( n < 100 )); do
-          [[ -z $(busy_panes "$sid") ]] && break
+          [[ -z $(busy_panes -s -t "$sid") ]] && break
           sleep 0.1
           n=$(( n + 1 ))
         done
@@ -574,6 +667,7 @@ usage() {
 usage: $(basename "$0") [team] [--colors]
        $(basename "$0") new [dir] [--name <team>] [--cmd <command>]
        $(basename "$0") join <team> [dir] [--cmd <command>]
+       $(basename "$0") remove <team> <name> [--force]
        $(basename "$0") close <team> [--force]
        $(basename "$0") --boot | --stop-all
        $(basename "$0") --list
@@ -589,7 +683,8 @@ USAGE
 case "${1:-}" in
   new)   shift; cmd_new "$@";   exit 0 ;;
   join)  shift; cmd_join "$@";  exit 0 ;;
-  close) shift; cmd_close "$@"; exit 0 ;;
+  close)  shift; cmd_close "$@";  exit 0 ;;
+  remove) shift; cmd_remove "$@"; exit 0 ;;
   --boot)     shift; cmd_boot "$@";     exit 0 ;;
   --stop-all) shift; cmd_stop_all "$@"; exit 0 ;;
 esac

@@ -28,6 +28,7 @@ team join api                 # appends this folder, adds a live window
 team join api ~/work/worker   # or name the folder explicitly
 team join api ~/notes --cmd 'nvim'   # again, any command
 
+team remove api web           # drop one window from the team
 team close api                # shut it down, leaving every session resumable
 team api                      # ...and bring it back, resuming each folder
 ```
@@ -46,6 +47,13 @@ seconds, then closes anyway — so each harness saves its own state rather than
 being killed mid-write. Claude appends its transcript as it goes and would
 usually survive a kill, but "usually" is the wrong standard for the thing you
 most want back. `--force` skips the asking.
+
+`remove <team> <name>` is the counterpart to `join`: the window's entry leaves
+the config and its live window is closed, harness asked to quit first. It refuses
+a team's last window — a config with no windows builds nothing, so that is
+`close` under another name — and it refuses a window that came from a glob entry,
+since dropping the entry would take its siblings too. Nothing is touched until
+those checks pass, so a refusal never costs you a session.
 
 `join` refuses a folder already in the team — two windows would both `--continue`
 the same transcript.
@@ -118,6 +126,7 @@ team                           # pick a team from a menu, then attach
 team api                       # attach (building it first if it is not running)
 team new [dir]                 # write a config for a folder and start it
 team join <team> [dir]         # add a folder to a team (config + live window)
+team remove <team> <name>      # drop one window (config entry + live window)
 team close <team>              # shut a team down and forget it
 team --list                    # teams, their sessions, and what is running
 team api --colors              # show the folder -> colour mapping
