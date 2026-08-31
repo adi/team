@@ -406,7 +406,7 @@ cmd_join() {
     return 0
   fi
 
-  local wid; wid="$(add_window "$sid" "$dir")"
+  local wid; wid="$(add_window "$sid" "$dir" "$cmd")"
   tmux select-window -t "$wid"
   attach "$sid"
 }
