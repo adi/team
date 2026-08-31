@@ -116,11 +116,18 @@ tab_color() {
 # environment can say whether the terminal is iTerm2. Without it, nothing is
 # written, so a non-iTerm client never receives a stray escape.
 tab_sync() {
-  local sid="$1" dir tty seq
+  local sid="$1" dir title tty seq
   [[ $(tmux show -t "$sid" -qv @team_tab 2>/dev/null) == 1 ]] || return 0
   dir="$(tmux display -p -t "$sid" '#{pane_current_path}' 2>/dev/null || true)"
   [[ -n $dir ]] || return 0
+  # agent@team, from the live session rather than a global, so this is right for
+  # any session the hook fires for.
+  title="$(tmux display -p -t "$sid" "#W@#{s/^$SESSION_PREFIX//:session_name}" 2>/dev/null || true)"
   seq="$(osc6 "$(basename "$dir")")"
+  # The title goes out here as well as through tmux's set-titles: tmux does not
+  # re-send it on switch-client, so switching to a team from inside tmux left the
+  # tab named after the team you came from.
+  [[ -z $title ]] || seq+="$(printf '\033]0;%s\a' "$title")"
   while IFS= read -r tty; do
     [[ -n $tty && -w $tty ]] || continue
     printf '%s' "$seq" >"$tty" 2>/dev/null || true
@@ -395,6 +402,9 @@ attach() {
   fi
   if [[ -n ${TMUX:-} ]]; then
     tmux switch-client -t "$sid"
+    # switch-client returns straight away, so paint the new session's tab here.
+    # attach-session below blocks until detach; its client-attached hook does it.
+    tab_sync "$sid"
   else
     tmux attach-session -t "$sid"
   fi

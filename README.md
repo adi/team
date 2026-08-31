@@ -207,6 +207,12 @@ nothing to keep in sync, and it reaches any terminal that advertises a title
 capability rather than iTerm2 only. `#{s/^team-//:session_name}` drops the session
 prefix, because the team is `new-b2b`, not `team-new-b2b`.
 
+With one exception: **tmux does not re-send the title on `switch-client`**, so
+running `team <other>` from inside tmux left the tab named after the team you came
+from. The name is therefore also pushed as OSC 0 alongside the colour, and
+`attach` paints explicitly after `switch-client` — which returns immediately,
+unlike `attach-session`, whose `client-attached` hook covers that path.
+
 ## Windows
 
 `windows` entries are validated — a line pointing at a missing directory is
