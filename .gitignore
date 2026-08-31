@@ -1,4 +1,3 @@
-# Real configs are personal: they list the projects you work on. Only the
-# example is tracked; everything else here stays local.
+# Configs are personal: they list the projects you work on, and `team new` writes
+# them as you go. None of them belong in the repo.
 configs/*.conf
-!configs/example.conf

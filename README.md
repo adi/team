@@ -63,11 +63,17 @@ session. Change `SESSION_PREFIX` at the top of `tmux-team.sh` (or set
 `TMUX_TEAM_PREFIX`) if you want a different one; avoid `[` and `]`, which are
 fnmatch metacharacters in tmux targets and glob characters in your shell.
 
-Ships with one config, `configs/example.conf`. Copy it, rename it, edit it:
+`configs/` starts empty and stays out of git — a config names the folders you
+work in. Write one by hand, or let `team new` and `team join` write it for you:
 
-| config | session | windows |
-|---|---|---|
-| `example` | `team-example` | api, web, worker, notes — a `claude` session per project, plus an editor |
+```
+# api: the api stack.
+#   name | directory | command
+
+api            | ~/work/api            | claude --continue
+web            | ~/work/web            | claude --continue
+notes          | ~/notes               | nvim
+```
 
 ### Globs
 
@@ -79,7 +85,7 @@ directory** — so a config tracks a tree instead of freezing today's contents:
 ```
 
 A window name of `*` means "use the folder's own name". Add or remove a subfolder
-and `team example --recreate` picks up the change with no edit to the config. A
+and `team api --recreate` picks up the change with no edit to the config. A
 glob that matches nothing is reported and skipped, like a missing directory; the
 rest of the config still loads. Expansion is unquoted, so paths with spaces need
 a literal line rather than a glob.
@@ -91,18 +97,17 @@ Note: `--auto` is not a claude flag — `auto` is a *permission mode*, hence
 ## Usage
 
 ```sh
-./install.sh                  # once: symlink ~/.local/bin/team + enable each config at boot
-./install.sh example          # ...or enable only some configs
+./install.sh                  # once: symlink ~/.local/bin/team + the login service
 team                           # pick a config from a menu, then attach
-team example                   # attach (creates the session first if it is not running)
+team api                       # attach (creates the session first if it is not running)
 team new [dir]                 # write a config for a folder and start it
 team join <team> [dir]         # add a folder to a team (config + live window)
 team close <team>             # shut a team down, keeping sessions resumable
-team example --recreate          # pick up config changes
+team api --recreate          # pick up config changes
 team --list                    # configs, their sessions, and what is running
-team example --colors          # show the folder -> colour mapping
-team example --detached        # create without attaching (what the service does)
-team --session foo example     # override the session name for a one-off
+team api --colors          # show the folder -> colour mapping
+team api --detached        # create without attaching (what the service does)
+team --session foo api     # override the session name for a one-off
 ```
 
 With no config named, `team` shows a numbered menu; if there is only one config it
@@ -253,7 +258,7 @@ per-tool install dirs are visible to a launchd or systemd job as well.
 
 You already keep one tmux session per project, named after the folder. tmux
 resolves a `-t name` target by *prefix and pattern*, so `-t team` also matches
-every session this tool creates, `team-example` included — and `set -t`/`display
+every session this tool creates, `team-api` included — and `set -t`/`display
 -t` do not honour the `=exact`
 prefix in tmux 3.4 either. Everything here therefore looks the session up by
 exact name once and then targets it by **session id** (`$38`), which is
