@@ -18,13 +18,26 @@
 
 set -euo pipefail
 
-# Resolve through the ~/.local/bin symlink so configs/ is found next to the real script.
-HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# Resolve through the ~/.local/bin symlink so configs/ is found next to the real
+# script. Done by hand because `readlink -f` is GNU-only: macOS ships BSD
+# readlink, which has no -f and would leave HERE pointing at ~/.local/bin.
+_resolve() {
+  local p="$1" d
+  while [[ -L $p ]]; do
+    d="$(cd "$(dirname "$p")" && pwd)"
+    p="$(readlink "$p")"
+    [[ $p == /* ]] || p="$d/$p"
+  done
+  printf '%s\n' "$p"
+}
+HERE="$(cd "$(dirname "$(_resolve "${BASH_SOURCE[0]}")")" && pwd)"
 CONFIG_DIR="${TMUX_TEAM_CONFIG_DIR:-$HERE/configs}"
 SESSION_PREFIX="${TMUX_TEAM_PREFIX-team-}"
 
-# Harnesses live in per-tool bin dirs a non-login systemd unit would not have.
-export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$HOME/bin:$PATH"
+# Harnesses live in per-tool bin dirs that a non-login systemd unit or a launchd
+# agent does not have; /opt/homebrew and /usr/local cover tmux and claude on
+# macOS, where launchd hands the job a minimal PATH.
+export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 # ---------------------------------------------------------------- bar colours --
 # 256-colour indices, all light enough to carry black text.
@@ -283,7 +296,8 @@ show_list() {
 # Ask which config to load, when none was named on the command line.
 pick_config() {
   local -a cfgs=(); local c n reply
-  mapfile -t cfgs < <(list_configs; list_unconfigured)
+  # A read loop rather than `mapfile`, which is bash 4+: macOS ships bash 3.2.
+  while IFS= read -r c; do cfgs+=("$c"); done < <(list_configs; list_unconfigured)
   (( ${#cfgs[@]} )) || die "no configs in $CONFIG_DIR and no teams running"
   if (( ${#cfgs[@]} == 1 )); then printf '%s\n' "${cfgs[0]}"; return; fi
   [[ -t 0 && -t 2 ]] || die "no config given; choose one of: ${cfgs[*]}"
@@ -476,9 +490,13 @@ cmd_close() {
   # Deleting the config is all it takes to keep the team from coming back: the
   # boot service builds whatever configs exist, so there is no per-team unit to
   # disable.
-  [[ -f $cfg ]] && { rm -f "$cfg"; echo "removed $cfg" >&2; }
-
-  echo "Claude sessions in those folders are untouched - 'team new <dir>' resumes them" >&2
+  # An `if`, not `[[ ]] && { }`: as the last statement in the function the latter
+  # returns 1 when there is no config, which `set -e` turns into a silent failure
+  # after the work is already done.
+  if [[ -f $cfg ]]; then
+    rm -f "$cfg"
+    echo "removed $cfg" >&2
+  fi
 }
 
 # Build every config, skipping teams already up. This is what the boot service

@@ -9,7 +9,7 @@ running a harness, and a status bar whose colour is derived from the folder name
 |---|---|
 | `configs/<name>.conf` | the files you edit: `name \| directory \| command` per window |
 | `tmux-team.sh`  | builds or attaches to the session for a config |
-| `install.sh`   | installs the `team` command and the boot-time user services |
+| `install.sh`   | installs the `team` command and the login-time service (systemd or launchd) |
 
 ## Teams on the fly
 
@@ -101,12 +101,12 @@ team close <team>             # shut a team down, keeping sessions resumable
 team example --recreate          # pick up config changes
 team --list                    # configs, their sessions, and what is running
 team example --colors          # show the folder -> colour mapping
-team example --detached        # create without attaching (what systemd runs)
+team example --detached        # create without attaching (what the service does)
 team --session foo example     # override the session name for a one-off
 ```
 
 With no config named, `team` shows a numbered menu; if there is only one config it
-picks it. Without a TTY (systemd) it refuses rather than hanging. `team` works from
+picks it. Without a TTY (a service) it refuses rather than hanging. `team` works from
 inside tmux too — it does `switch-client` instead of `attach`.
 
 ## Bar colour
@@ -185,41 +185,69 @@ setw -g window-status-current-format "#[reverse,bold] #I #W#{s/[-*]//:window_fla
 `M` marked. Without that substitution a zoomed pane gives you no indication at
 all that the window is zoomed.
 
-## Boot
+## Starting at login
 
-`install.sh` writes one unit, `~/.config/systemd/user/tmux-team.service`, which
-builds every config it finds:
+One service builds every config. There is deliberately no service per team: a
+team is a config file, so adding one is writing a config and closing one is
+deleting it — neither needs the init system told, and a config can never be
+enabled while missing, or missing while enabled.
+
+**Linux (systemd).** `install.sh` writes
+`~/.config/systemd/user/tmux-team.service`:
 
 * `ExecStart=tmux-team.sh --boot` — one session per config, skipping any already
-  running, and one broken config does not stop the rest.
-* `ExecStop=tmux-team.sh --stop-all` — kills the team sessions. It does not touch
-  configs; that is `close`'s job.
+  running; one broken config does not stop the rest.
+* `ExecStop=tmux-team.sh --stop-all` — kills the team sessions and leaves the
+  configs alone. Stopping is not closing.
 * `Type=oneshot` + `RemainAfterExit=yes` — the unit represents "the teams exist".
 * `KillMode=process` — the tmux server daemonises out of the unit's main process,
-  so only that process is signalled on stop and `ExecStop` does the real teardown.
-* `WantedBy=default.target` — started with your user manager.
+  so only that process is signalled and `ExecStop` does the real teardown.
 
-There is deliberately no unit per team. A team is a config file, so adding one is
-writing a config and closing one is deleting it — neither needs systemd told
-about it, and a config can never be enabled at boot while missing, or missing
-while enabled.
-
-It also enables *lingering* for your account (`loginctl enable-linger`). Without
-lingering the user manager only exists while you are logged in, so teams would
-start at your first login rather than at boot. If enabling it needs
-authentication, run `sudo loginctl enable-linger $USER` yourself.
+It also enables *lingering* (`loginctl enable-linger`), without which the user
+manager only exists while you are logged in and the teams would start at first
+login rather than at boot.
 
 ```sh
 systemctl --user status  tmux-team
 systemctl --user restart tmux-team     # rebuild whatever is missing
-team --boot                            # the same thing, by hand
 ```
+
+**macOS (launchd).** `install.sh` writes
+`~/Library/LaunchAgents/com.adi.team.plist` with `RunAtLoad`, and loads it with
+`launchctl bootstrap gui/$UID` (falling back to `load -w` on older systems).
+
+A LaunchAgent runs at **login**, not at boot: macOS has no per-user equivalent of
+lingering, and there is no user session to own a tmux server beforehand. Output
+goes to `~/Library/Logs/team.log`, since a launchd job has no terminal.
+
+```sh
+launchctl kickstart -k gui/$UID/com.adi.team   # rebuild whatever is missing
+launchctl bootout gui/$UID/com.adi.team        # stop starting teams at login
+tail -f ~/Library/Logs/team.log
+```
+
+Either way, `team --boot` does the same thing by hand.
+
+## Portability
+
+Runs on Linux and macOS. Requirements are tmux, bash, and whatever harness your
+configs name.
+
+* **Stock macOS bash is 3.2**, so nothing here uses bash 4 features — no
+  `mapfile`, no associative arrays.
+* **`readlink -f` is GNU-only.** The script resolves its own symlink by hand, so
+  `~/.local/bin/team` still finds `configs/` next to the real file.
+* **`PATH` for a launchd or systemd job is minimal**, so the script prepends
+  `~/.local/bin`, `~/.opencode/bin`, `~/bin`, `/opt/homebrew/bin` and
+  `/usr/local/bin` — where tmux and claude actually live.
+* Window bar colours come from `cksum`, which is POSIX CRC32 on both platforms,
+  so a folder keeps the same colour on either.
 
 ## Adding a harness
 
 Append a line to the config and run `team <config> --recreate`. Anything on `$PATH`
 works; the launcher prepends `~/.local/bin`, `~/.opencode/bin` and `~/bin` so
-per-tool install dirs are visible to the non-login systemd unit as well.
+per-tool install dirs are visible to a launchd or systemd job as well.
 
 ## A note on session targeting
 

@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
-# Install the `team` command and the one boot service that builds every team.
+# Install the `team` command and the one service that builds every team when you
+# log in. Linux uses a systemd user unit, macOS a launchd agent.
 #
 #   ./install.sh                 install `team`, start the teams now
 #   ./install.sh --no-start      install without starting them
+#
+# Safe to re-run; each step is idempotent.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UNIT_DIR="$HOME/.config/systemd/user"
+AGENT_DIR="$HOME/Library/LaunchAgents"
+LABEL="com.adi.team"
 BIN_DIR="$HOME/.local/bin"
 START=1
 
@@ -17,13 +22,70 @@ for a in "$@"; do
   esac
 done
 
-mkdir -p "$UNIT_DIR" "$BIN_DIR"
+command -v tmux >/dev/null || echo "warning: tmux not found (brew install tmux)" >&2
+
+mkdir -p "$BIN_DIR"
 ln -sfn "$HERE/tmux-team.sh" "$BIN_DIR/team"
 echo "installed $BIN_DIR/team -> $HERE/tmux-team.sh"
+case ":$PATH:" in
+  *":$BIN_DIR:"*) ;;
+  *) echo "note: $BIN_DIR is not on your PATH; add it to run 'team' by name" >&2 ;;
+esac
 
-# One unit builds every config. A team is a config file, so adding a team is
-# writing one and closing a team is deleting it - neither touches systemd.
-cat > "$UNIT_DIR/tmux-team.service" <<UNITFILE
+# One service builds every config. A team is a config file, so adding a team is
+# writing one and closing a team is deleting it - neither tells the init system
+# anything, and a config can never be enabled while missing or missing while
+# enabled.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  # ------------------------------------------------------------------ launchd --
+  # A LaunchAgent runs at *login*, not at boot: macOS has no per-user equivalent
+  # of systemd lingering, and there is no user session to own tmux before login.
+  mkdir -p "$AGENT_DIR" "$HOME/Library/Logs"
+  PLIST="$AGENT_DIR/$LABEL.plist"
+  cat > "$PLIST" <<PLISTFILE
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$HERE/tmux-team.sh</string>
+    <string>--boot</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>TERM</key>
+    <string>tmux-256color</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>$HOME/Library/Logs/team.log</string>
+  <key>StandardErrorPath</key>
+  <string>$HOME/Library/Logs/team.log</string>
+</dict>
+</plist>
+PLISTFILE
+  echo "wrote $PLIST"
+
+  if (( START )); then
+    # bootout first so a re-run picks up the new plist; it fails when nothing is
+    # loaded, which is fine. bootstrap is the modern spelling of `load -w`, and
+    # the fallback covers older systems.
+    launchctl bootout "gui/$UID/$LABEL" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/$UID" "$PLIST" 2>/dev/null || launchctl load -w "$PLIST"
+    echo "loaded $LABEL -> one session per config in $HERE/configs"
+  else
+    echo "not loaded; your teams will start at next login"
+    echo "  to load it now: launchctl bootstrap gui/$UID $PLIST"
+  fi
+  echo "logs: ~/Library/Logs/team.log"
+else
+  # ------------------------------------------------------------------ systemd --
+  mkdir -p "$UNIT_DIR"
+  cat > "$UNIT_DIR/tmux-team.service" <<UNITFILE
 [Unit]
 Description=tmux harness sessions (every team config)
 Documentation=file://$HERE/README.md
@@ -43,34 +105,35 @@ TimeoutStartSec=300
 [Install]
 WantedBy=default.target
 UNITFILE
-echo "wrote $UNIT_DIR/tmux-team.service"
+  echo "wrote $UNIT_DIR/tmux-team.service"
 
-# Retire the per-config template and every instance enabled from it.
-if [[ -f $UNIT_DIR/tmux-team@.service ]]; then
-  while IFS= read -r inst; do
-    [[ -n $inst ]] || continue
-    systemctl --user disable "$inst" >/dev/null 2>&1 || true
-    echo "retired $inst (left any running session alone)"
-  done < <(ls -1 "$UNIT_DIR/default.target.wants" 2>/dev/null | grep '^tmux-team@' || true)
-  rm -f "$UNIT_DIR/tmux-team@.service"
-  echo "removed the per-config tmux-team@.service template"
-fi
+  # Retire the per-config template and every instance enabled from it.
+  if [[ -f $UNIT_DIR/tmux-team@.service ]]; then
+    while IFS= read -r inst; do
+      [[ -n $inst ]] || continue
+      systemctl --user disable "$inst" >/dev/null 2>&1 || true
+      echo "retired $inst (left any running session alone)"
+    done < <(ls -1 "$UNIT_DIR/default.target.wants" 2>/dev/null | grep '^tmux-team@' || true)
+    rm -f "$UNIT_DIR/tmux-team@.service"
+    echo "removed the per-config tmux-team@.service template"
+  fi
 
-systemctl --user daemon-reload
-systemctl --user reset-failed 'tmux-team*' >/dev/null 2>&1 || true
-if (( START )); then
-  systemctl --user enable --now tmux-team.service
-else
-  systemctl --user enable tmux-team.service
-fi
-echo "enabled tmux-team.service -> one session per config in $HERE/configs"
+  systemctl --user daemon-reload
+  systemctl --user reset-failed 'tmux-team*' >/dev/null 2>&1 || true
+  if (( START )); then
+    systemctl --user enable --now tmux-team.service
+  else
+    systemctl --user enable tmux-team.service
+  fi
+  echo "enabled tmux-team.service -> one session per config in $HERE/configs"
 
-# Without lingering the user manager is torn down at logout, so nothing starts
-# the sessions until the next interactive login.
-if [[ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" != "yes" ]]; then
-  loginctl enable-linger "$USER" 2>/dev/null \
-    && echo "enabled linger for $USER" \
-    || echo "note: run 'sudo loginctl enable-linger $USER' for boot (pre-login) start" >&2
+  # Without lingering the user manager is torn down at logout, so nothing starts
+  # the sessions until the next interactive login.
+  if [[ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" != "yes" ]]; then
+    loginctl enable-linger "$USER" 2>/dev/null \
+      && echo "enabled linger for $USER" \
+      || echo "note: run 'sudo loginctl enable-linger $USER' for boot (pre-login) start" >&2
+  fi
 fi
 
 echo
