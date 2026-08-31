@@ -157,19 +157,55 @@ colour, on any machine, across reboots.
 
 ### The tab
 
-Attaching also paints the terminal tab, from the **team's** name through the same
-palette — so the tab identifies the team while the bar identifies the window you
-are in. Two levels, one palette.
+The terminal tab is painted the colour of the **selected window**, so it always
+matches the bar: switch windows and the tab follows.
 
-It goes out as iTerm2's OSC 6, wrapped for tmux passthrough when `team` is run
-from inside tmux (which also needs `allow-passthrough on`, set for you). The
-sequence is emitted only when iTerm2 announces itself through `LC_TERMINAL` or
-`TERM_PROGRAM` — iTerm2 sets `LC_TERMINAL` and forwards it over ssh, so this
-works from a Mac into a remote box. Everywhere else nothing is written at all,
-rather than a stray escape. `TMUX_TEAM_TAB_COLOR=0` turns it off.
+The bar can recolour itself from a format (`#{@barcolor}` expanded on every
+redraw), but a tab colour has to be pushed to the terminal as an escape sequence,
+so something has to fire on every window change. That is a tmux hook:
 
-The colour is not reset on detach: the tab keeps the last team's colour until
-something else sets it.
+* **`after-select-window`** does nearly all the work, and covers more than its
+  name suggests — tmux routes `next-window` and `last-window` through it, so
+  `prefix-n`, `prefix-p`, `prefix-l` and a mouse click on the status line all
+  arrive here. There is no `after-next-window` or `after-kill-window` in tmux
+  3.4; those names are rejected outright. `pane-focus-in` does not fire on a
+  window switch.
+* **`client-attached`** and **`client-session-changed`** cover arriving at a
+  session, and `after-new-window[1]` covers a new window becoming current — index
+  `[1]` because `[0]` is the window-styling hook, and a second plain `set-hook`
+  for the same name replaces rather than adds.
+
+The hook passes the session as `#{q:session_id}`, not `#{session_id}`. A session
+id looks like `$0`, `run-shell` hands the command to `sh -c`, and an unquoted
+`$0` there expands to the shell's own name — so the id never arrives. The `q:`
+modifier escapes it.
+
+The sequence is iTerm2's OSC 6, written straight to each attached client's
+`#{client_tty}` — inside a hook there is no terminal on stdout to smuggle it
+through, and OSC 6 changes no screen content, so tmux has nothing to redraw over
+it. The session carries `@team_tab`, set when `team` attaches, which is the only
+moment the environment can say whether the terminal is iTerm2 (`LC_TERMINAL`,
+which iTerm2 sets and forwards over ssh, or `TERM_PROGRAM`). Without that flag
+nothing is written, so a non-iTerm client never receives a stray escape.
+`TMUX_TEAM_TAB_COLOR=0` turns it off.
+
+The colour is not reset on detach: the tab keeps its last colour until something
+else sets it.
+
+### The tab name
+
+The tab is named **`agent@team`** — the window's name and the team's, e.g.
+`mono@new-b2b`. That is left to tmux rather than pushed as an escape:
+
+```
+set-titles on
+set-titles-string "#W@#{s/^team-//:session_name}"
+```
+
+`set-titles-string` is a format, so the name follows the current window with
+nothing to keep in sync, and it reaches any terminal that advertises a title
+capability rather than iTerm2 only. `#{s/^team-//:session_name}` drops the session
+prefix, because the team is `new-b2b`, not `team-new-b2b`.
 
 ## Windows
 

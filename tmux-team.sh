@@ -72,21 +72,30 @@ xterm_rgb() {
   printf '%s %s %s' "$r" "$g" "$b"
 }
 
-# tab_color <team-name>: paint the terminal tab from the team's name, using the
-# same palette the window bars come from, so a team is one colour end to end.
-#
-# OSC 6 is iTerm2's own sequence. Other terminals would ignore it, but a stray
-# escape is not worth the risk, so it goes out only when iTerm2 says it is there:
-# LC_TERMINAL is set by iTerm2 and forwarded over ssh, which is what makes this
-# work from a Mac into a Linux box. TMUX_TEAM_TAB_COLOR=0 turns it off.
-tab_color() {
-  [[ ${TMUX_TEAM_TAB_COLOR:-1} == 1 ]] || return 0
-  [[ ${LC_TERMINAL:-} == iTerm2 || ${TERM_PROGRAM:-} == iTerm.app ]] || return 0
-  local rgb r g b seq
+# osc6 <folder-name> -> iTerm2's tab-colour escape sequence for that folder's
+# palette entry, on stdout.
+osc6() {
+  local rgb r g b
   rgb="$(xterm_rgb "$(palette_index "$1")")"
   read -r r g b <<<"$rgb"
-  printf -v seq '\033]6;1;bg;red;brightness;%d\a\033]6;1;bg;green;brightness;%d\a\033]6;1;bg;blue;brightness;%d\a' \
+  printf '\033]6;1;bg;red;brightness;%d\a\033]6;1;bg;green;brightness;%d\a\033]6;1;bg;blue;brightness;%d\a' \
     "$r" "$g" "$b"
+}
+
+# iterm_here: is the terminal running this command iTerm2? LC_TERMINAL is set by
+# iTerm2 and forwarded over ssh, which is what makes this work from a Mac into a
+# remote box. TMUX_TEAM_TAB_COLOR=0 turns the whole feature off.
+iterm_here() {
+  [[ ${TMUX_TEAM_TAB_COLOR:-1} == 1 ]] || return 1
+  [[ ${LC_TERMINAL:-} == iTerm2 || ${TERM_PROGRAM:-} == iTerm.app ]]
+}
+
+# tab_color <folder-name>: paint this terminal's tab, from the shell `team` was
+# run in. Used at attach time, when the environment says whether iTerm2 is there;
+# after that the tmux hooks take over (see tab_sync).
+tab_color() {
+  iterm_here || return 0
+  local seq; seq="$(osc6 "$1")"
   if [[ -n ${TMUX:-} ]]; then
     # Inside tmux the sequence has to be smuggled out to the real terminal.
     tmux set -g allow-passthrough on 2>/dev/null || true
@@ -94,6 +103,28 @@ tab_color() {
   else
     printf '%s' "$seq" >/dev/tty 2>/dev/null || true
   fi
+}
+
+# tab_sync <session-id>: repaint the tab of every client attached to that session
+# to match its *current window*, so the tab tracks the bar as you move around.
+#
+# Writing straight to each client's tty rather than through passthrough: this
+# runs from a tmux hook, where there is no terminal on stdout to smuggle through.
+# OSC 6 changes no screen content, so tmux has nothing to redraw over it.
+#
+# The session carries @team_tab, set at attach time - the only moment when the
+# environment can say whether the terminal is iTerm2. Without it, nothing is
+# written, so a non-iTerm client never receives a stray escape.
+tab_sync() {
+  local sid="$1" dir tty seq
+  [[ $(tmux show -t "$sid" -qv @team_tab 2>/dev/null) == 1 ]] || return 0
+  dir="$(tmux display -p -t "$sid" '#{pane_current_path}' 2>/dev/null || true)"
+  [[ -n $dir ]] || return 0
+  seq="$(osc6 "$(basename "$dir")")"
+  while IFS= read -r tty; do
+    [[ -n $tty && -w $tty ]] || continue
+    printf '%s' "$seq" >"$tty" 2>/dev/null || true
+  done < <(tmux list-clients -t "$sid" -F '#{client_tty}' 2>/dev/null || true)
 }
 
 # ------------------------------------------------------------------- helpers ---
@@ -259,6 +290,11 @@ wait_for_prompt() {
 # status-style is a session option and tmux expands #{} inside styles against
 # the client's *current* window, so the bar repaints itself from that window's
 # @barcolor on every redraw - no hooks, no polling.
+#
+# The terminal title is left to tmux for the same reason: set-titles-string is a
+# format, so "agent@team" follows the current window with nothing to keep in
+# sync. #{s/^team-//:session_name} drops the session prefix, since the team is
+# "new-b2b", not "team-new-b2b".
 style_session() {
   local s="$1"
   tmux set -t "$s" status on \; \
@@ -273,12 +309,32 @@ style_session() {
        set -t "$s" renumber-windows on \; \
        set -t "$s" mouse on \; \
        set -t "$s" history-limit 100000 \; \
-       set -t "$s" @tmux_setup_config "$CONFIG_NAME"
+       set -t "$s" @tmux_setup_config "$CONFIG_NAME" \; \
+       set -t "$s" set-titles on \; \
+       set -t "$s" set-titles-string "#W@#{s/^$SESSION_PREFIX//:session_name}"
 
   # Windows created by hand later must be styled too, or they fall back to the
   # global defaults.
   tmux set-hook -t "$s" after-new-window \
     "run-shell -b '$HERE/tmux-team.sh --style-window \"#{window_id}\"'"
+
+  # And the tab follows the current window.
+  #
+  # after-select-window is the one that matters, and it covers more than its name
+  # suggests: tmux routes next-window and last-window through it, so prefix-n,
+  # prefix-p, prefix-l and a mouse click on the status line all arrive here.
+  # There is no after-next-window or after-kill-window in tmux 3.4 - those names
+  # are rejected outright. pane-focus-in does not fire on a window switch.
+  #
+  # after-new-window takes index [1] because [0] is the styling hook above; a
+  # second plain `set-hook` for the same name would replace it.
+  local h
+  for h in after-select-window client-attached client-session-changed; do
+    tmux set-hook -t "$s" "$h" \
+      "run-shell -b '$HERE/tmux-team.sh --tab-sync \"#{q:session_id}\"'"
+  done
+  tmux set-hook -t "$s" 'after-new-window[1]' \
+    "run-shell -b '$HERE/tmux-team.sh --tab-sync \"#{q:session_id}\"'"
 }
 
 # window-status-*, pane-border-* and *-rename are WINDOW options: "set -t <session>"
@@ -329,9 +385,14 @@ build_session() {
 }
 
 attach() {
-  local sid="$1" sname
-  sname="$(tmux display -p -t "$sid" '#{session_name}' 2>/dev/null || true)"
-  [[ -z $sname ]] || tab_color "${sname#$SESSION_PREFIX}"
+  local sid="$1" dir
+  # Record here, not in the hook: this is the only point where the environment
+  # can tell us the terminal is iTerm2.
+  if iterm_here; then
+    tmux set -t "$sid" @team_tab 1 2>/dev/null || true
+    dir="$(tmux display -p -t "$sid" '#{pane_current_path}' 2>/dev/null || true)"
+    [[ -z $dir ]] || tab_color "$(basename "$dir")"
+  fi
   if [[ -n ${TMUX:-} ]]; then
     tmux switch-client -t "$sid"
   else
@@ -733,12 +794,13 @@ case "${1:-}" in
   --stop-all) shift; cmd_stop_all "$@"; exit 0 ;;
 esac
 
-MODE=attach; CONFIG_NAME=''; SESSION_OVERRIDE=''; STYLE_WID=''
+MODE=attach; CONFIG_NAME=''; SESSION_OVERRIDE=''; STYLE_WID=''; TAB_SID=''
 while (( $# )); do
   case "$1" in
     --list)                MODE=list ;;
     --colors|--colours)    MODE=colors ;;
     --style-window)        MODE=style-window; STYLE_WID="${2:-}"; shift ;;
+    --tab-sync)            MODE=tab-sync; TAB_SID="${2:-}"; shift ;;
     --session)             SESSION_OVERRIDE="${2:-}"; shift ;;
     -h|--help)             usage; exit 0 ;;
     -*)                    usage; die "unknown option: $1" ;;
@@ -748,6 +810,10 @@ while (( $# )); do
 done
 
 if [[ $MODE == list ]]; then show_list; exit 0; fi
+if [[ $MODE == tab-sync ]]; then
+  [[ -n $TAB_SID ]] || die "--tab-sync needs a session id"
+  tab_sync "$TAB_SID"; exit 0
+fi
 if [[ $MODE == style-window ]]; then
   [[ -n $STYLE_WID ]] || die "--style-window needs a window id"
   style_window "$STYLE_WID"; exit 0
