@@ -155,6 +155,22 @@ and no polling. `pane-active-border-style` follows the same colour.
 The mapping is pure and stable: the same folder name always yields the same
 colour, on any machine, across reboots.
 
+### The tab
+
+Attaching also paints the terminal tab, from the **team's** name through the same
+palette — so the tab identifies the team while the bar identifies the window you
+are in. Two levels, one palette.
+
+It goes out as iTerm2's OSC 6, wrapped for tmux passthrough when `team` is run
+from inside tmux (which also needs `allow-passthrough on`, set for you). The
+sequence is emitted only when iTerm2 announces itself through `LC_TERMINAL` or
+`TERM_PROGRAM` — iTerm2 sets `LC_TERMINAL` and forwards it over ssh, so this
+works from a Mac into a remote box. Everywhere else nothing is written at all,
+rather than a stray escape. `TMUX_TEAM_TAB_COLOR=0` turns it off.
+
+The colour is not reset on detach: the tab keeps the last team's colour until
+something else sets it.
+
 ## Windows
 
 `windows` entries are validated — a line pointing at a missing directory is
@@ -277,7 +293,7 @@ configs name.
   `~/.local/bin`, `~/.opencode/bin`, `~/bin`, `/opt/homebrew/bin` and
   `/usr/local/bin` — where tmux and claude actually live.
 * Window bar colours come from `cksum`, which is POSIX CRC32 on both platforms,
-  so a folder keeps the same colour on either.
+  so a folder — and a team's tab — keeps the same colour on either.
 
 ## Adding a harness
 

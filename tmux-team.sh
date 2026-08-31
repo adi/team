@@ -47,11 +47,53 @@ PALETTE=(
  168 173 174 175 178 179 180 181 209 210 211 214 215 216 220 222
 )
 
-# barcolor <folder-name> -> "colourNNN"; stable across machines and reboots.
-barcolor() {
+# palette_index <string> -> the xterm colour number that string always maps to.
+palette_index() {
   local h
   h=$(printf '%s' "$1" | cksum | cut -d' ' -f1)
-  printf 'colour%s' "${PALETTE[$(( h % ${#PALETTE[@]} ))]}"
+  printf '%s' "${PALETTE[$(( h % ${#PALETTE[@]} ))]}"
+}
+
+# barcolor <folder-name> -> "colourNNN"; stable across machines and reboots.
+barcolor() {
+  printf 'colour%s' "$(palette_index "$1")"
+}
+
+# xterm_rgb <index> -> "R G B" for an xterm-256 colour number.
+xterm_rgb() {
+  local i="$1" r g b
+  local -a levels=(0 95 135 175 215 255)
+  if (( i >= 16 && i <= 231 )); then
+    i=$(( i - 16 ))
+    r="${levels[$(( i / 36 ))]}"; g="${levels[$(( (i % 36) / 6 ))]}"; b="${levels[$(( i % 6 ))]}"
+  else
+    r=$(( 8 + 10 * (i - 232) )); g="$r"; b="$r"
+  fi
+  printf '%s %s %s' "$r" "$g" "$b"
+}
+
+# tab_color <team-name>: paint the terminal tab from the team's name, using the
+# same palette the window bars come from, so a team is one colour end to end.
+#
+# OSC 6 is iTerm2's own sequence. Other terminals would ignore it, but a stray
+# escape is not worth the risk, so it goes out only when iTerm2 says it is there:
+# LC_TERMINAL is set by iTerm2 and forwarded over ssh, which is what makes this
+# work from a Mac into a Linux box. TMUX_TEAM_TAB_COLOR=0 turns it off.
+tab_color() {
+  [[ ${TMUX_TEAM_TAB_COLOR:-1} == 1 ]] || return 0
+  [[ ${LC_TERMINAL:-} == iTerm2 || ${TERM_PROGRAM:-} == iTerm.app ]] || return 0
+  local rgb r g b seq
+  rgb="$(xterm_rgb "$(palette_index "$1")")"
+  read -r r g b <<<"$rgb"
+  printf -v seq '\033]6;1;bg;red;brightness;%d\a\033]6;1;bg;green;brightness;%d\a\033]6;1;bg;blue;brightness;%d\a' \
+    "$r" "$g" "$b"
+  if [[ -n ${TMUX:-} ]]; then
+    # Inside tmux the sequence has to be smuggled out to the real terminal.
+    tmux set -g allow-passthrough on 2>/dev/null || true
+    printf '\033Ptmux;%s\033\\' "${seq//$'\033'/$'\033\033'}" >/dev/tty 2>/dev/null || true
+  else
+    printf '%s' "$seq" >/dev/tty 2>/dev/null || true
+  fi
 }
 
 # ------------------------------------------------------------------- helpers ---
@@ -287,7 +329,9 @@ build_session() {
 }
 
 attach() {
-  local sid="$1"
+  local sid="$1" sname
+  sname="$(tmux display -p -t "$sid" '#{session_name}' 2>/dev/null || true)"
+  [[ -z $sname ]] || tab_color "${sname#$SESSION_PREFIX}"
   if [[ -n ${TMUX:-} ]]; then
     tmux switch-client -t "$sid"
   else
