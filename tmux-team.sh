@@ -5,6 +5,7 @@
 #   tmux-team.sh <config>           create if needed, then attach
 #   tmux-team.sh new [dir]          start a team of one from a folder
 #   tmux-team.sh join <team> [dir]  add a folder to an existing team
+#   tmux-team.sh close [team]       shut a team down, keeping sessions resumable
 #   tmux-team.sh <config> --detached   create without attaching (systemd / boot)
 #   tmux-team.sh <config> --recreate   tear the session down and rebuild it
 #   tmux-team.sh --list             list configs and whether they are running
@@ -63,9 +64,13 @@ list_adhoc() {
 }
 
 # Exact-name lookup; prints the session id, or nothing if there is no such session.
+# Note the `|| true`: with no tmux server running at all, list-sessions exits 1,
+# and under `set -o pipefail` that aborted the entire script - precisely on the
+# first run after boot, when there is no server yet and a session has to be
+# built. Every tmux query that can legitimately find nothing needs this.
 session_id() {
-  tmux list-sessions -F '#{session_name}	#{session_id}' 2>/dev/null \
-    | awk -F'\t' -v n="$1" '$1 == n { print $2; exit }'
+  { tmux list-sessions -F '#{session_name}	#{session_id}' 2>/dev/null \
+    | awk -F'\t' -v n="$1" '$1 == n { print $2; exit }'; } || true
 }
 
 # Emits "name<TAB>dir<TAB>command" per usable window; warns about the rest.
@@ -264,13 +269,13 @@ show_list() {
     fi
   done
 
-  # Teams started with `new` have no config file; without this they would run
-  # invisibly to --list.
+  # A running team whose config is gone (deleted, or built with --session) would
+  # otherwise be invisible here. `team save <name>` gives it one back.
   while IFS=$'\t' read -r s sid; do
     [[ $s == "$SESSION_PREFIX"* ]] || continue
     c="${s#$SESSION_PREFIX}"
     [[ -f "$CONFIG_DIR/$c.conf" ]] && continue
-    printf '%-16s %-18s %-9s %s\n' "(ad-hoc)" "$s" running \
+    printf '%-16s %-18s %-9s %s\n' "(unsaved)" "$s" running \
       "$(tmux list-windows -t "$sid" -F '#{window_name}' | paste -sd, -)"
   done < <(tmux list-sessions -F '#{session_name}	#{session_id}' 2>/dev/null)
 }
@@ -294,7 +299,11 @@ pick_config() {
   printf '%s\n' "${cfgs[reply-1]}"
 }
 
-# team new [dir] [--name <team>] [--detached]: a team of one, no config file.
+# team new [dir] [--name <team>] [--detached]: start a team from one folder.
+#
+# This writes configs/<name>.conf and then builds it through the same path as any
+# other team. Teams used to exist as tmux state alone, which made them a second
+# class the rest of the tool had to special-case; a team is a config, full stop.
 cmd_new() {
   local dir='' name='' detached=0
   while (( $# )); do
@@ -310,26 +319,29 @@ cmd_new() {
 
   dir="$(cd "${dir:-$PWD}" 2>/dev/null && pwd)" || die "no such directory: ${dir:-$PWD}"
   name="${name:-$(basename "$dir")}"
-  SESSION="${SESSION_PREFIX}${name}"
   CONFIG_NAME="$name"
+  CONFIG_FILE="$CONFIG_DIR/$name.conf"
+  SESSION="${SESSION_PREFIX}${name}"
 
   [[ -z $(session_id "$SESSION") ]] \
-    || die "$SESSION already exists - 'team join $name $dir' to add this folder, or 'team $name' to attach"
+    || die "$SESSION is already running - 'team join $name $dir' to add this folder, or 'team $name' to attach"
+  [[ ! -f $CONFIG_FILE ]] \
+    || die "config '$name' already exists - 'team $name' to start it, or pass --name for a different team"
 
-  local sid wid
-  sid=$(tmux new-session -d -s "$SESSION" -n "$(basename "$dir")" -c "$dir" -P -F '#{session_id}')
-  wid=$(tmux display -p -t "$sid" '#{window_id}')
-  style_window "$wid"
-  style_session "$sid"
-  tmux move-window -r -t "$sid:"
-  wait_for_prompt "$wid"
-  tmux send-keys -t "$wid" "$(claude_cmd "$dir")" C-m
+  { config_header "$name" new; config_line "$dir"; } >"$CONFIG_FILE"
+  echo "wrote $CONFIG_FILE" >&2
 
-  echo "created $SESSION with $(basename "$dir") ($(claude_cmd "$dir"))" >&2
-  (( detached )) || attach "$sid"
+  if (( detached )); then
+    ensure_session >/dev/null
+  else
+    attach "$(ensure_session)"
+  fi
 }
 
-# team join <team> [dir] [--detached]: add a folder to a team that already runs.
+# team join <team> [dir] [--detached]: add a folder to a team.
+#
+# The folder is appended to the team's config, so it is part of the team the next
+# time it is built, and added as a live window when the team is running now.
 cmd_join() {
   local team='' dir='' detached=0
   while (( $# )); do
@@ -345,23 +357,150 @@ cmd_join() {
   [[ -n $team ]] || die "usage: $(basename "$0") join <team> [dir]"
   dir="$(cd "${dir:-$PWD}" 2>/dev/null && pwd)" || die "no such directory: ${dir:-$PWD}"
 
-  # Accept the team name with or without the prefix, since --list prints both.
+  local name="${team#$SESSION_PREFIX}"
+  CONFIG_NAME="$name"
+  CONFIG_FILE="$CONFIG_DIR/$name.conf"
+  SESSION="${SESSION_PREFIX}${name}"
+  local sid; sid="$(session_id "$SESSION")"
+
+  # A session with no config predates this behaviour; capture what it is running
+  # before appending, so nothing already in the team is lost.
+  if [[ ! -f $CONFIG_FILE ]]; then
+    [[ -n $sid ]] || die "no team called '$name' - 'team new $dir --name $name' to start one"
+    echo "saved the running lineup to $(save_team "$sid" "$name")" >&2
+  fi
+
+  # Two windows on one folder would both --continue the same transcript.
+  grep -Fxq "$dir" <(config_dirs "$CONFIG_FILE") \
+    && die "$dir is already in team '$name'"
+  config_line "$dir" >>"$CONFIG_FILE"
+  echo "added $(basename "$dir") to $CONFIG_FILE" >&2
+
+  if [[ -z $sid ]]; then
+    echo "team '$name' is not running - 'team $name' to start it" >&2
+    return 0
+  fi
+
+  local wid; wid="$(add_window "$sid" "$dir")"
+  tmux select-window -t "$wid"
+  (( detached )) || attach "$sid"
+}
+
+# Panes running something other than a login shell - i.e. a live harness.
+busy_panes() {
+  { tmux list-panes -s -t "$1" -F '#{pane_id} #{pane_current_command}' 2>/dev/null \
+    | awk '$2 != "bash" && $2 != "zsh" && $2 != "sh" && $2 != "fish" && $2 != "dash" { print $1 }'; } || true
+}
+
+# One line of a config file: "name | dir | command", ~ kept short.
+config_line() {
+  local dir="$1"
+  printf '%-14s | %-34s | %s\n' "$(basename "$dir")" "${dir/#$HOME/\~}" "$(claude_cmd "$dir")"
+}
+
+config_header() {
+  printf '# %s: written by `team %s` on %s.\n' "$1" "$2" "$(date +%Y-%m-%d)"
+  printf '#   name | directory | command\n\n'
+}
+
+# Directories a config already lists, one per line.
+config_dirs() {
+  [[ -f $1 ]] || return 0
+  CONFIG_FILE="$1" read_config 2>/dev/null | cut -f2
+}
+
+# Write a config file from a team's live windows, so a team that has no config
+# yet survives being closed. The harness command is decided per folder the same way `new`
+# does it, rather than frozen as --continue: a folder whose transcript is not
+# resumable would otherwise reopen straight onto "No conversation found".
+save_team() {
+  local sid="$1" name="$2" dest="$CONFIG_DIR/$name.conf" dir
+  {
+    printf '# %s: saved from the running team on %s.\n' "$name" "$(date +%Y-%m-%d)"
+    printf '#   name | directory | command\n\n'
+    while IFS=$'\t' read -r wname dir; do
+      printf '%-14s | %-34s | %s\n' "$wname" "${dir/#$HOME/\~}" "$(claude_cmd "$dir")"
+    done < <(tmux list-windows -t "$sid" -F '#{window_name}	#{pane_current_path}')
+  } >"$dest"
+  printf '%s\n' "$dest"
+}
+
+# team save [team]: write a config from a running team without closing it.
+cmd_save() {
+  local team="${1:-}"
+  [[ -n $team || -z ${TMUX:-} ]] || team="$(tmux display -p '#{session_name}')"
+  [[ -n $team ]] || die "usage: $(basename "$0") save <team>"
+  local name="${team#$SESSION_PREFIX}" sid
+  sid="$(session_id "${SESSION_PREFIX}${name}")"
+  [[ -n $sid ]] || die "no running team called '$name'"
+  echo "wrote $(save_team "$sid" "$name")" >&2
+}
+
+# team close [team] [--no-save] [--force]: shut a team down, leaving every Claude
+# session resumable.
+#
+# Claude writes its transcript as it goes, so a killed pane is usually still
+# resumable - but "usually" is not good enough for the thing the user cares most
+# about keeping, so ask each harness to exit and only then take the session down.
+cmd_close() {
+  local team='' nosave=0 force=0
+  while (( $# )); do
+    case "$1" in
+      --no-save)  nosave=1 ;;
+      --force)    force=1 ;;
+      -h|--help)  echo "usage: $(basename "$0") close [team] [--no-save] [--force]" >&2; exit 0 ;;
+      -*)         die "unknown option: $1" ;;
+      *)          team="$1" ;;
+    esac
+    shift
+  done
+
+  # No name given: close the team this shell is sitting in.
+  if [[ -z $team && -n ${TMUX:-} ]]; then
+    team="$(tmux display -p '#{session_name}')"
+  fi
+  [[ -n $team ]] || die "usage: $(basename "$0") close <team>  (or run it from inside one)"
+
   local session="$team" sid
   [[ $session == "$SESSION_PREFIX"* ]] || session="${SESSION_PREFIX}${team}"
   sid="$(session_id "$session")"
-  [[ -n $sid ]] || die "no running team called '$team' - 'team new $dir --name $team' to start one"
+  [[ -n $sid ]] || die "no running team called '$team'"
+  local name="${session#$SESSION_PREFIX}"
 
-  # A folder already in the team would give two windows fighting over one
-  # Claude session, and --continue would resume the same transcript twice.
-  local existing
-  existing="$(tmux list-panes -s -t "$sid" -F '#{pane_current_path}' | grep -Fx "$dir" || true)"
-  [[ -z $existing ]] || die "$dir is already a window in $session"
+  # Teams written by `new`/`join` already have a config; this catches a session
+  # that predates that, or one made with --session.
+  if (( ! nosave )) && [[ ! -f "$CONFIG_DIR/$name.conf" ]]; then
+    echo "saved lineup to $(save_team "$sid" "$name")" >&2
+  fi
+  echo "'team $name' will rebuild it, resuming each folder's session" >&2
 
-  local wid
-  wid="$(add_window "$sid" "$dir")"
-  tmux select-window -t "$wid"
-  echo "added $(basename "$dir") to $session ($(claude_cmd "$dir"))" >&2
-  (( detached )) || attach "$sid"
+  if (( ! force )); then
+    local pane n=0 asked=0
+    # Anything that is not a bare shell is treated as a harness worth asking.
+    # Matching on the command being exactly "claude" would miss it the moment it
+    # runs behind a wrapper, and the cost of asking a non-harness is one
+    # "command not found" line in a pane that is about to disappear.
+    while IFS= read -r pane; do
+      tmux send-keys -t "$pane" Escape 2>/dev/null || true
+      tmux send-keys -t "$pane" "/exit" C-m 2>/dev/null || true
+      asked=$(( asked + 1 ))
+    done < <(busy_panes "$sid")
+
+    if (( asked )); then
+      echo "asked $asked harness pane(s) to exit..." >&2
+      # Poll rather than sleep a fixed time: a clean exit is usually immediate,
+      # and a stuck one should not hold the close hostage either.
+      while (( n < 100 )); do
+        [[ -z $(busy_panes "$sid") ]] && break
+        sleep 0.1
+        n=$(( n + 1 ))
+      done
+      (( n < 100 )) || echo "note: a harness did not exit in 10s; closing anyway" >&2
+    fi
+  fi
+
+  tmux kill-session -t "$sid"
+  echo "closed $session" >&2
 }
 
 usage() {
@@ -369,6 +508,8 @@ usage() {
 usage: $(basename "$0") [config] [--attach|--detached|--recreate|--colors]
        $(basename "$0") new [dir] [--name <team>] [--detached]
        $(basename "$0") join <team> [dir] [--detached]
+       $(basename "$0") close [team] [--no-save] [--force]
+       $(basename "$0") save [team]
        $(basename "$0") --list
        $(basename "$0") --session <name> <config>
 
@@ -380,8 +521,10 @@ USAGE
 # Subcommands come first and parse their own arguments. A config named "new" or
 # "join" would be shadowed; name one of those and use --session to reach it.
 case "${1:-}" in
-  new)  shift; cmd_new "$@";  exit 0 ;;
-  join) shift; cmd_join "$@"; exit 0 ;;
+  new)   shift; cmd_new "$@";   exit 0 ;;
+  join)  shift; cmd_join "$@";  exit 0 ;;
+  close) shift; cmd_close "$@"; exit 0 ;;
+  save)  shift; cmd_save "$@";  exit 0 ;;
 esac
 
 MODE=attach; CONFIG_NAME=''; SESSION_OVERRIDE=''; STYLE_WID=''
@@ -424,7 +567,8 @@ if [[ ! -f $CONFIG_FILE ]]; then
   case "$MODE" in
     attach)   attach "$adhoc_sid"; exit 0 ;;
     detached) exit 0 ;;   # asked for it running; it is
-    *)        die "$CONFIG_NAME is an ad-hoc team with no config file; --$MODE needs one" ;;
+    *)        die "team '$CONFIG_NAME' has no config file; --$MODE rebuilds from one." \
+                  "Run 'team save $CONFIG_NAME' first" ;;
   esac
 fi
 

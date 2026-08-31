@@ -11,40 +11,44 @@ running a harness, and a status bar whose colour is derived from the folder name
 | `tmux-team.sh`  | builds or attaches to the session for a config |
 | `install.sh`   | installs the `team` command and the boot-time user services |
 
-## Ad-hoc teams
+## Teams on the fly
 
-A config file is for a lineup you keep coming back to. For everything else,
-build a team as you go:
+A team *is* a config file. `new` and `join` write one for you, so a team you
+build in ten seconds behaves exactly like one you hand-wrote — every command
+works on it, and it survives a reboot.
 
 ```bash
 cd ~/work/api
-team new                      # team-api, one window, claude running in it
-team new ~/work/api           # same, from anywhere
+team new                      # writes configs/api.conf, starts team-api
 team new ~/work/api --name b2b  # call the team something else
 
 cd ~/work/web
-team join api                 # add this folder to team-api as a new window
+team join api                 # appends this folder, adds a live window
 team join api ~/work/worker   # or name the folder explicitly
+
+team close api                # shut it down, leaving every session resumable
+team api                      # ...and bring it back, resuming each folder
+team save api                 # write a config from a running team, without closing
 ```
 
 Each window runs `claude --continue` when that folder has a resumable Claude
 session and plain `claude` when it does not. The check is not "is there a
 transcript file": a folder can hold transcripts from one-shot `-p`/SDK runs that
 `--continue` refuses to resume, so it looks for at least one *interactive*
-transcript and falls back to a fresh session otherwise. A window that opens on
-"No conversation found to continue" is worse than one that just starts clean.
+transcript. A window that opens on "No conversation found to continue" is worse
+than one that starts clean. `join` decides per folder, at the moment it writes
+the line.
 
-Reach a team afterwards the same way as a config-backed one — `team api` attaches,
-`team --list` shows it as `(ad-hoc)`, and it appears in the menu `team` offers with
-no argument. `--recreate` and `--colors` are the exception: they rebuild from a
-config file, so they refuse a team that has none.
+`close` asks every non-shell pane to `/exit` and waits for it to go — up to ten
+seconds, then closes anyway — so each harness saves its own state rather than
+being killed mid-write. Claude appends its transcript as it goes and would
+usually survive a kill, but "usually" is the wrong standard for the thing you
+most want back. `--force` skips the asking; `--no-save` skips writing a config
+for a team that has none.
 
-`join` refuses a folder that is already a window in that team — two windows on
-one folder would both `--continue` the same transcript — and refuses a team that
-is not running, rather than quietly creating it. Teams made this way have no
-config file, so `--list` shows them as `(ad-hoc)`.
-
-Both take `--detached` to build without attaching.
+`join` refuses a folder already in the team — two windows would both `--continue`
+the same transcript. A running team whose config you delete shows as `(unsaved)`
+in `--list`; `team save` gives it one back.
 
 ## Configs
 
@@ -87,8 +91,10 @@ Note: `--auto` is not a claude flag — `auto` is a *permission mode*, hence
 ./install.sh example          # ...or enable only some configs
 team                           # pick a config from a menu, then attach
 team example                   # attach (creates the session first if it is not running)
-team new [dir]                 # start a team of one from a folder (no config file)
-team join <team> [dir]         # add a folder to a team that is already running
+team new [dir]                 # write a config for a folder and start it
+team join <team> [dir]         # add a folder to a team (config + live window)
+team close [team]              # shut a team down, keeping sessions resumable
+team save [team]               # write a config from a running team
 team example --recreate          # pick up config changes
 team --list                    # configs, their sessions, and what is running
 team example --colors          # show the folder -> colour mapping
