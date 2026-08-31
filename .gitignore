@@ -1,0 +1,4 @@
+# Real configs are personal: they list the projects you work on. Only the
+# example is tracked; everything else here stays local.
+configs/*.conf
+!configs/example.conf

@@ -52,6 +52,16 @@ list_configs() {
   done
 }
 
+# Names of running teams that have no config file behind them.
+list_adhoc() {
+  local name
+  while IFS= read -r name; do
+    [[ $name == "$SESSION_PREFIX"* ]] || continue
+    name="${name#$SESSION_PREFIX}"
+    [[ -f "$CONFIG_DIR/$name.conf" ]] || printf '%s\n' "$name"
+  done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null)
+}
+
 # Exact-name lookup; prints the session id, or nothing if there is no such session.
 session_id() {
   tmux list-sessions -F '#{session_name}	#{session_id}' 2>/dev/null \
@@ -268,8 +278,8 @@ show_list() {
 # Ask which config to load, when none was named on the command line.
 pick_config() {
   local -a cfgs=(); local c n reply
-  mapfile -t cfgs < <(list_configs)
-  (( ${#cfgs[@]} )) || die "no configs in $CONFIG_DIR"
+  mapfile -t cfgs < <(list_configs; list_adhoc)
+  (( ${#cfgs[@]} )) || die "no configs in $CONFIG_DIR and no teams running"
   if (( ${#cfgs[@]} == 1 )); then printf '%s\n' "${cfgs[0]}"; return; fi
   [[ -t 0 && -t 2 ]] || die "no config given; choose one of: ${cfgs[*]}"
 
@@ -399,8 +409,24 @@ fi
 
 [[ -n $CONFIG_NAME ]] || CONFIG_NAME="$(pick_config)"
 CONFIG_FILE="$CONFIG_DIR/$CONFIG_NAME.conf"
-[[ -f $CONFIG_FILE ]] || die "no such config: $CONFIG_NAME (have: $(list_configs | paste -sd' ' -))"
 SESSION="${SESSION_OVERRIDE:-${SESSION_PREFIX}${CONFIG_NAME}}"
+
+# A team built with `new` has no config file, but it is still a team: reaching it
+# by name is the whole point of naming it. Only the modes that rebuild from a
+# config need one.
+if [[ ! -f $CONFIG_FILE ]]; then
+  adhoc_sid="$(session_id "$SESSION")"
+  if [[ -z $adhoc_sid ]]; then
+    die "no such config or running team: $CONFIG_NAME" \
+        "(configs: $(list_configs | paste -sd' ' -)" \
+        "| running: $(list_adhoc | paste -sd' ' -))"
+  fi
+  case "$MODE" in
+    attach)   attach "$adhoc_sid"; exit 0 ;;
+    detached) exit 0 ;;   # asked for it running; it is
+    *)        die "$CONFIG_NAME is an ad-hoc team with no config file; --$MODE needs one" ;;
+  esac
+fi
 
 case "$MODE" in
   colors)

@@ -34,6 +34,11 @@ transcript file": a folder can hold transcripts from one-shot `-p`/SDK runs that
 transcript and falls back to a fresh session otherwise. A window that opens on
 "No conversation found to continue" is worse than one that just starts clean.
 
+Reach a team afterwards the same way as a config-backed one — `team api` attaches,
+`team --list` shows it as `(ad-hoc)`, and it appears in the menu `team` offers with
+no argument. `--recreate` and `--colors` are the exception: they rebuild from a
+config file, so they refuse a team that has none.
+
 `join` refuses a folder that is already a window in that team — two windows on
 one folder would both `--continue` the same transcript — and refuses a team that
 is not running, rather than quietly creating it. Teams made this way have no
