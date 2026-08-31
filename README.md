@@ -20,11 +20,13 @@ works on it, and it survives a reboot.
 ```bash
 cd ~/work/api
 team new                      # writes configs/api.conf, starts team-api
-team new ~/work/api --name b2b  # call the team something else
+team new ~/work/api --name b2b   # call the team something else
+team new ~/work/api --cmd 'nvim' # run something other than claude
 
 cd ~/work/web
 team join api                 # appends this folder, adds a live window
 team join api ~/work/worker   # or name the folder explicitly
+team join api ~/notes --cmd 'nvim'   # again, any command
 
 team close api                # shut it down, leaving every session resumable
 team api                      # ...and bring it back, resuming each folder
@@ -85,7 +87,8 @@ directory** — so a config tracks a tree instead of freezing today's contents:
 ```
 
 A window name of `*` means "use the folder's own name". Add or remove a subfolder
-and `team api --recreate` picks up the change with no edit to the config. A
+and rebuilding the team picks up the change with no edit to the config — close
+the session (`tmux kill-session -t =team-api`) and run `team api` again. A
 glob that matches nothing is reported and skipped, like a missing directory; the
 rest of the config still loads. Expansion is unquoted, so paths with spaces need
 a literal line rather than a glob.
@@ -98,19 +101,17 @@ Note: `--auto` is not a claude flag — `auto` is a *permission mode*, hence
 
 ```sh
 ./install.sh                  # once: symlink ~/.local/bin/team + the login service
-team                           # pick a config from a menu, then attach
-team api                       # attach (creates the session first if it is not running)
+team                           # pick a team from a menu, then attach
+team api                       # attach (building it first if it is not running)
 team new [dir]                 # write a config for a folder and start it
 team join <team> [dir]         # add a folder to a team (config + live window)
-team close <team>             # shut a team down, keeping sessions resumable
-team api --recreate          # pick up config changes
-team --list                    # configs, their sessions, and what is running
-team api --colors          # show the folder -> colour mapping
-team api --detached        # create without attaching (what the service does)
-team --session foo api     # override the session name for a one-off
+team close <team>              # shut a team down and forget it
+team --list                    # teams, their sessions, and what is running
+team api --colors              # show the folder -> colour mapping
+team --session foo api         # override the session name for a one-off
 ```
 
-With no config named, `team` shows a numbered menu; if there is only one config it
+With no team named, `team` shows a numbered menu; if there is only one it
 picks it. Without a TTY (a service) it refuses rather than hanging. `team` works from
 inside tmux too — it does `switch-client` instead of `attach`.
 
@@ -258,7 +259,8 @@ configs name.
 
 ## Adding a harness
 
-Append a line to the config and run `team <config> --recreate`. Anything on `$PATH`
+Append a line to the config — or `team join <team> <dir> --cmd '<command>'`, which
+writes it for you and opens the window straight away. Anything on `$PATH`
 works; the launcher prepends `~/.local/bin`, `~/.opencode/bin` and `~/bin` so
 per-tool install dirs are visible to a launchd or systemd job as well.
 

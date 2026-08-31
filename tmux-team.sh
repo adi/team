@@ -5,9 +5,8 @@
 #   tmux-team.sh <config>           create if needed, then attach
 #   tmux-team.sh new [dir]          start a team of one from a folder
 #   tmux-team.sh join <team> [dir]  add a folder to an existing team
+#                                   both take --cmd to run something other than claude
 #   tmux-team.sh close <team>       shut a team down, keeping sessions resumable
-#   tmux-team.sh <config> --detached   create without attaching (systemd / boot)
-#   tmux-team.sh <config> --recreate   tear the session down and rebuild it
 #   tmux-team.sh --list             list configs and whether they are running
 #   tmux-team.sh [config] --colors  print the folder -> colour mapping
 #
@@ -153,13 +152,15 @@ claude_cmd() {
   if has_claude_session "$1"; then printf 'claude --continue'; else printf 'claude'; fi
 }
 
-# Add one window for <dir> to session <sid> and start its harness in it.
+# Add one window for <dir> to session <sid>, running <command> - or claude,
+# resuming where it can, when none is given.
 add_window() {
-  local sid="$1" dir="$2" wid
+  local sid="$1" dir="$2" cmd="${3:-}" wid
+  [[ -n $cmd ]] || cmd="$(claude_cmd "$dir")"
   wid=$(tmux new-window -t "$sid:" -n "$(basename "$dir")" -c "$dir" -P -F '#{window_id}')
   style_window "$wid"
   wait_for_prompt "$wid"
-  tmux send-keys -t "$wid" "$(claude_cmd "$dir")" C-m
+  tmux send-keys -t "$wid" "$cmd" C-m
   printf '%s\n' "$wid"
 }
 
@@ -313,24 +314,25 @@ pick_config() {
   printf '%s\n' "${cfgs[reply-1]}"
 }
 
-# team new [dir] [--name <team>] [--detached]: start a team from one folder.
+# team new [dir] [--name <team>] [--cmd <command>]: start a team from one folder.
 #
 # This writes configs/<name>.conf and then builds it through the same path as any
 # other team. Teams used to exist as tmux state alone, which made them a second
 # class the rest of the tool had to special-case; a team is a config, full stop.
 cmd_new() {
-  local dir='' name='' detached=0
+  local dir='' name='' cmd=''
   while (( $# )); do
     case "$1" in
       --name)      name="${2:-}"; shift ;;
-      --detached)  detached=1 ;;
-      -h|--help)   echo "usage: $(basename "$0") new [dir] [--name <team>] [--detached]" >&2; exit 0 ;;
+      --cmd)       cmd="${2:-}"; shift ;;
+      -h|--help)   echo "usage: $(basename "$0") new [dir] [--name <team>] [--cmd <command>]" >&2; exit 0 ;;
       -*)          die "unknown option: $1" ;;
       *)           dir="$1" ;;
     esac
     shift
   done
 
+  [[ -z $cmd ]] || check_cmd "$cmd"
   dir="$(cd "${dir:-$PWD}" 2>/dev/null && pwd)" || die "no such directory: ${dir:-$PWD}"
   name="${name:-$(basename "$dir")}"
   CONFIG_NAME="$name"
@@ -342,26 +344,22 @@ cmd_new() {
   [[ ! -f $CONFIG_FILE ]] \
     || die "config '$name' already exists - 'team $name' to start it, or pass --name for a different team"
 
-  { config_header "$name" new; config_line "$dir"; } >"$CONFIG_FILE"
+  { config_header "$name" new; config_line "$dir" "$cmd"; } >"$CONFIG_FILE"
   echo "wrote $CONFIG_FILE" >&2
 
-  if (( detached )); then
-    ensure_session >/dev/null
-  else
-    attach "$(ensure_session)"
-  fi
+  attach "$(ensure_session)"
 }
 
-# team join <team> [dir] [--detached]: add a folder to a team.
+# team join <team> [dir] [--cmd <command>]: add a folder to a team.
 #
 # The folder is appended to the team's config, so it is part of the team the next
 # time it is built, and added as a live window when the team is running now.
 cmd_join() {
-  local team='' dir='' detached=0
+  local team='' dir='' cmd=''
   while (( $# )); do
     case "$1" in
-      --detached)  detached=1 ;;
-      -h|--help)   echo "usage: $(basename "$0") join <team> [dir] [--detached]" >&2; exit 0 ;;
+      --cmd)       cmd="${2:-}"; shift ;;
+      -h|--help)   echo "usage: $(basename "$0") join <team> [dir] [--cmd <command>]" >&2; exit 0 ;;
       -*)          die "unknown option: $1" ;;
       *)           if [[ -z $team ]]; then team="$1"; else dir="$1"; fi ;;
     esac
@@ -369,6 +367,7 @@ cmd_join() {
   done
 
   [[ -n $team ]] || die "usage: $(basename "$0") join <team> [dir]"
+  [[ -z $cmd ]] || check_cmd "$cmd"
   dir="$(cd "${dir:-$PWD}" 2>/dev/null && pwd)" || die "no such directory: ${dir:-$PWD}"
 
   local name="${team#$SESSION_PREFIX}"
@@ -388,7 +387,7 @@ cmd_join() {
   # Two windows on one folder would both --continue the same transcript.
   grep -Fxq "$dir" <(config_dirs "$CONFIG_FILE") \
     && die "$dir is already in team '$name'"
-  config_line "$dir" >>"$CONFIG_FILE"
+  config_line "$dir" "$cmd" >>"$CONFIG_FILE"
   echo "added $(basename "$dir") to $CONFIG_FILE" >&2
 
   if [[ -z $sid ]]; then
@@ -398,7 +397,7 @@ cmd_join() {
 
   local wid; wid="$(add_window "$sid" "$dir")"
   tmux select-window -t "$wid"
-  (( detached )) || attach "$sid"
+  attach "$sid"
 }
 
 # Panes running something other than a login shell - i.e. a live harness.
@@ -408,9 +407,22 @@ busy_panes() {
 }
 
 # One line of a config file: "name | dir | command", ~ kept short.
+# A config line is "name | dir | command" and # starts a comment, so a command
+# containing either character would be silently truncated or mis-split. Refuse it
+# rather than writing a config that does not say what was asked for.
+check_cmd() {
+  case "$1" in
+    *'|'*) die "--cmd cannot contain '|': config lines are pipe-delimited" ;;
+    *'#'*) die "--cmd cannot contain '#': the config treats it as a comment" ;;
+  esac
+}
+
+# config_line <dir> [command] - the command defaults to claude, resuming that
+# folder's session when there is one to resume.
 config_line() {
-  local dir="$1"
-  printf '%-14s | %-34s | %s\n' "$(basename "$dir")" "${dir/#$HOME/\~}" "$(claude_cmd "$dir")"
+  local dir="$1" cmd="${2:-}"
+  [[ -n $cmd ]] || cmd="$(claude_cmd "$dir")"
+  printf '%-14s | %-34s | %s\n' "$(basename "$dir")" "${dir/#$HOME/\~}" "$cmd"
 }
 
 config_header() {
@@ -539,9 +551,9 @@ cmd_stop_all() {
 
 usage() {
   cat >&2 <<USAGE
-usage: $(basename "$0") [config] [--attach|--detached|--recreate|--colors]
-       $(basename "$0") new [dir] [--name <team>] [--detached]
-       $(basename "$0") join <team> [dir] [--detached]
+usage: $(basename "$0") [team] [--colors]
+       $(basename "$0") new [dir] [--name <team>] [--cmd <command>]
+       $(basename "$0") join <team> [dir] [--cmd <command>]
        $(basename "$0") close <team> [--force]
        $(basename "$0") --boot | --stop-all
        $(basename "$0") --list
@@ -567,9 +579,6 @@ while (( $# )); do
   case "$1" in
     --list)                MODE=list ;;
     --colors|--colours)    MODE=colors ;;
-    --recreate)            MODE=recreate ;;
-    --detached)            MODE=detached ;;
-    --attach)              MODE=attach ;;
     --style-window)        MODE=style-window; STYLE_WID="${2:-}"; shift ;;
     --session)             SESSION_OVERRIDE="${2:-}"; shift ;;
     -h|--help)             usage; exit 0 ;;
@@ -601,9 +610,8 @@ if [[ ! -f $CONFIG_FILE ]]; then
         "| running: $(list_unconfigured | paste -sd' ' -))"
   fi
   case "$MODE" in
-    attach)   attach "$orphan_sid"; exit 0 ;;
-    detached) exit 0 ;;   # asked for it running; it is
-    *)        die "team '$CONFIG_NAME' has no config file, and --$MODE rebuilds from one" ;;
+    attach) attach "$orphan_sid"; exit 0 ;;
+    *)      die "team '$CONFIG_NAME' has no config file, and --$MODE reads one" ;;
   esac
 fi
 
@@ -612,12 +620,6 @@ case "$MODE" in
     while IFS=$'\t' read -r name dir cmd; do
       printf '%-16s %-34s %s\n' "$name" "$dir" "$(barcolor "$(basename "$dir")")"
     done < <(read_config) ;;
-  recreate)
-    sid="$(session_id "$SESSION")"
-    [[ -n $sid ]] && tmux kill-session -t "$sid"
-    attach "$(build_session | tail -1)" ;;
-  detached)
-    ensure_session >/dev/null ;;
   attach)
     attach "$(ensure_session)" ;;
 esac
