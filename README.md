@@ -28,7 +28,6 @@ team join api ~/work/worker   # or name the folder explicitly
 
 team close api                # shut it down, leaving every session resumable
 team api                      # ...and bring it back, resuming each folder
-team save api                 # write a config from a running team, without closing
 ```
 
 Each window runs `claude --continue` when that folder has a resumable Claude
@@ -48,8 +47,8 @@ most want back. `--force` skips the asking; `--no-save` skips writing a config
 for a team that has none.
 
 `join` refuses a folder already in the team — two windows would both `--continue`
-the same transcript. A running team whose config you delete shows as `(unsaved)`
-in `--list`; `team save` gives it one back.
+the same transcript. A running team whose config you delete shows as `(unsaved)` in
+`--list`; closing it writes the config back.
 
 ## Configs
 
@@ -95,7 +94,6 @@ team example                   # attach (creates the session first if it is not 
 team new [dir]                 # write a config for a folder and start it
 team join <team> [dir]         # add a folder to a team (config + live window)
 team close <team>             # shut a team down, keeping sessions resumable
-team save [team]               # write a config from a running team
 team example --recreate          # pick up config changes
 team --list                    # configs, their sessions, and what is running
 team example --colors          # show the folder -> colour mapping

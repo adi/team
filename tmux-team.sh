@@ -270,7 +270,7 @@ show_list() {
   done
 
   # A running team whose config is gone (deleted, or built with --session) would
-  # otherwise be invisible here. `team save <name>` gives it one back.
+  # otherwise be invisible here. Closing it writes the config back.
   while IFS=$'\t' read -r s sid; do
     [[ $s == "$SESSION_PREFIX"* ]] || continue
     c="${s#$SESSION_PREFIX}"
@@ -409,8 +409,9 @@ config_dirs() {
   CONFIG_FILE="$1" read_config 2>/dev/null | cut -f2
 }
 
-# Write a config file from a team's live windows, so a team that has no config
-# yet survives being closed. The harness command is decided per folder the same way `new`
+# Write a config file from a team's live windows, so a team that somehow has no
+# config - its file deleted, or a session built with --session - still survives
+# being closed. `new` and `join` keep the config current, so this is a fallback. The harness command is decided per folder the same way `new`
 # does it, rather than frozen as --continue: a folder whose transcript is not
 # resumable would otherwise reopen straight onto "No conversation found".
 save_team() {
@@ -423,17 +424,6 @@ save_team() {
     done < <(tmux list-windows -t "$sid" -F '#{window_name}	#{pane_current_path}')
   } >"$dest"
   printf '%s\n' "$dest"
-}
-
-# team save [team]: write a config from a running team without closing it.
-cmd_save() {
-  local team="${1:-}"
-  [[ -n $team || -z ${TMUX:-} ]] || team="$(tmux display -p '#{session_name}')"
-  [[ -n $team ]] || die "usage: $(basename "$0") save <team>"
-  local name="${team#$SESSION_PREFIX}" sid
-  sid="$(session_id "${SESSION_PREFIX}${name}")"
-  [[ -n $sid ]] || die "no running team called '$name'"
-  echo "wrote $(save_team "$sid" "$name")" >&2
 }
 
 # team close <team> [--no-save] [--force]: shut a team down, leaving every Claude
@@ -507,7 +497,6 @@ usage: $(basename "$0") [config] [--attach|--detached|--recreate|--colors]
        $(basename "$0") new [dir] [--name <team>] [--detached]
        $(basename "$0") join <team> [dir] [--detached]
        $(basename "$0") close <team> [--no-save] [--force]
-       $(basename "$0") save [team]
        $(basename "$0") --list
        $(basename "$0") --session <name> <config>
 
@@ -522,7 +511,6 @@ case "${1:-}" in
   new)   shift; cmd_new "$@";   exit 0 ;;
   join)  shift; cmd_join "$@";  exit 0 ;;
   close) shift; cmd_close "$@"; exit 0 ;;
-  save)  shift; cmd_save "$@";  exit 0 ;;
 esac
 
 MODE=attach; CONFIG_NAME=''; SESSION_OVERRIDE=''; STYLE_WID=''
@@ -565,8 +553,7 @@ if [[ ! -f $CONFIG_FILE ]]; then
   case "$MODE" in
     attach)   attach "$adhoc_sid"; exit 0 ;;
     detached) exit 0 ;;   # asked for it running; it is
-    *)        die "team '$CONFIG_NAME' has no config file; --$MODE rebuilds from one." \
-                  "Run 'team save $CONFIG_NAME' first" ;;
+    *)        die "team '$CONFIG_NAME' has no config file, and --$MODE rebuilds from one" ;;
   esac
 fi
 
