@@ -229,6 +229,9 @@ def window(d, cmd):
     return w
 
 def write(path, doc):
+    # configs/ is git-ignored, so a fresh clone has no such directory until the
+    # first team is written.
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as fh:
         json.dump(doc, fh, indent=2)
         fh.write("\n")
