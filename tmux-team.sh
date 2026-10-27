@@ -245,6 +245,24 @@ elif mode == "append":
     doc = load(sys.argv[2])
     doc["windows"].append(window(sys.argv[3], sys.argv[4]))
     write(sys.argv[2], doc)
+elif mode in ("get_window", "set_command"):
+    path, target = sys.argv[2], sys.argv[3]
+    doc = load(path)
+    matches = [w for w in doc["windows"] if isinstance(w, dict)
+               and str(w.get("name") or os.path.basename(str(w.get("dir", "")).rstrip("/"))) == target]
+    if len(matches) != 1:
+        sys.exit(f"expected exactly one literal window named {target!r}; found {len(matches)}")
+    w = matches[0]
+    d = os.path.expanduser(str(w.get("dir", "")))
+    if not d or any(c in d for c in "*?["):
+        sys.exit("operation requires a literal directory, not a glob")
+    if mode == "set_command":
+        w["cmd"] = sys.argv[4]
+        write(path, doc)
+    elif sys.argv[4] == "dir":
+        print(d)
+    else:
+        print(str(w.get("cmd") or ""))
 elif mode in ("remove", "check_remove"):
     # Match a literal entry only: a window that came from a glob has no entry of
     # its own, and dropping the glob would take its siblings with it.
@@ -509,11 +527,12 @@ cmd_new() {
 # The folder is appended to the team's config, so it is part of the team the next
 # time it is built, and added as a live window when the team is running now.
 cmd_join() {
-  local team='' dir='' cmd=''
+  local team='' dir='' cmd='' no_attach=0
   while (( $# )); do
     case "$1" in
       --cmd)       cmd="${2:-}"; shift ;;
-      -h|--help)   echo "usage: $(basename "$0") join <team> [dir] [--cmd <command>]" >&2; exit 0 ;;
+      --no-attach) no_attach=1 ;;
+      -h|--help)   echo "usage: $(basename "$0") join <team> [dir] [--cmd <command>] [--no-attach]" >&2; exit 0 ;;
       -*)          die "unknown option: $1" ;;
       *)           if [[ -z $team ]]; then team="$1"; else dir="$1"; fi ;;
     esac
@@ -550,8 +569,10 @@ cmd_join() {
   fi
 
   local wid; wid="$(add_window "$sid" "$dir" "$cmd")"
-  tmux select-window -t "$wid"
-  attach "$sid"
+  if (( ! no_attach )); then
+    tmux select-window -t "$wid"
+    attach "$sid"
+  fi
 }
 
 # busy_panes <list-panes target args>: panes running something other than a
@@ -588,10 +609,11 @@ claude_cmd() {
 add_window() {
   local sid="$1" dir="$2" cmd="${3:-}" wid
   [[ -n $cmd ]] || cmd="$(claude_cmd "$dir")"
-  wid=$(tmux new-window -t "$sid:" -n "$(basename "$dir")" -c "$dir" -P -F '#{window_id}')
+  wid=$(tmux new-window -d -t "$sid:" -n "$(basename "$dir")" -c "$dir" -P -F '#{window_id}')
   style_window "$wid"
   wait_for_prompt "$wid"
-  tmux send-keys -t "$wid" "$cmd" C-m
+  tmux send-keys -t "$wid" -l -- "$cmd"
+  tmux send-keys -t "$wid" C-m
   printf '%s\n' "$wid"
 }
 
@@ -665,6 +687,54 @@ cmd_remove() {
   echo "removed '$target' from $CONFIG_FILE" >&2
   [[ -n $wid ]] && echo "closed its window" >&2
   return 0
+}
+
+# Change a saved command without touching the running process.
+cmd_set_command() {
+  [[ $# == 4 && $3 == --cmd ]] || die "usage: team set-command <team> <window> --cmd <command>"
+  local name="${1#$SESSION_PREFIX}"
+  [[ $name =~ ^[a-zA-Z0-9_-][a-zA-Z0-9._-]*$ ]] || die "invalid team name"
+  local cfg="$CONFIG_DIR/$name.json"
+  [[ -f $cfg ]] || die "no team called '$name'"
+  config_py set_command "$cfg" "$2" "$4"
+  echo "saved command for $2 in $cfg (running window unchanged)"
+}
+
+# Restart a single-pane window using the saved directory and command.
+# Never silently kill a running harness or restart the caller's own pane.
+cmd_restart() {
+  [[ $# == 2 || ( $# == 3 && $3 == --force ) ]] || die "usage: team restart <team> <window> [--force]"
+  local name="${1#$SESSION_PREFIX}" target="$2" force=0
+  [[ ${3:-} != --force ]] || force=1
+  [[ $name =~ ^[a-zA-Z0-9_-][a-zA-Z0-9._-]*$ ]] || die "invalid team name"
+  local cfg="$CONFIG_DIR/$name.json" sid wid dir cmd panes caller
+  [[ -f $cfg ]] || die "no team called '$name'"
+  dir="$(config_py get_window "$cfg" "$target" dir)"
+  cmd="$(config_py get_window "$cfg" "$target" cmd)"
+  [[ -d $dir ]] || die "no such directory: $dir"
+  sid="$(session_id "${SESSION_PREFIX}${name}")"
+  [[ -n $sid ]] || die "team '$name' is not running"
+  local matches
+  matches="$(tmux list-windows -t "$sid" -F '#{window_id}	#{window_name}' | awk -F'\t' -v n="$target" '$2 == n {print $1}')"
+  [[ -n $matches && $matches != *$'\n'* ]] || die "expected exactly one live window named '$target'"
+  wid="$matches"
+  panes="$(tmux list-panes -t "$wid" -F '#{pane_id}')"
+  [[ $panes != *$'\n'* ]] || die "refusing to restart a multi-pane window"
+  if [[ -n ${TMUX_PANE:-} ]]; then
+    caller="$(tmux display-message -p -t "$TMUX_PANE" '#{window_id}' 2>/dev/null || true)"
+    [[ $caller != "$wid" ]] || die "refusing to restart the caller's own window"
+  fi
+  if (( ! force )); then
+    [[ $(tmux display-message -p -t "$wid" '#{window_linked}') != 1 ]] || die "window is linked to other sessions; --force required"
+    [[ -z $(busy_panes -t "$wid") ]] || die "window has a running process; exit it first or explicitly use --force"
+  fi
+  tmux respawn-pane -k -t "$panes" -c "$dir"
+  wait_for_prompt "$panes"
+  if [[ -n $cmd ]]; then
+    tmux send-keys -t "$panes" -l -- "$cmd"
+    tmux send-keys -t "$panes" C-m
+  fi
+  echo "restarted $target in $name using its saved command"
 }
 
 # team close <team> [--force]: shut a team down and forget it.
@@ -784,7 +854,9 @@ usage() {
   cat >&2 <<USAGE
 usage: $(basename "$0") [team] [--colors]
        $(basename "$0") new [dir] [--name <team>] [--cmd <command>]
-       $(basename "$0") join <team> [dir] [--cmd <command>]
+       $(basename "$0") join <team> [dir] [--cmd <command>] [--no-attach]
+       $(basename "$0") set-command <team> <window> --cmd <command>
+       $(basename "$0") restart <team> <window> [--force]
        $(basename "$0") remove <team> <name> [--force]
        $(basename "$0") close <team> [--force]
        $(basename "$0") --boot | --stop-all
@@ -801,6 +873,8 @@ USAGE
 case "${1:-}" in
   new)   shift; cmd_new "$@";   exit 0 ;;
   join)  shift; cmd_join "$@";  exit 0 ;;
+  set-command) shift; cmd_set_command "$@"; exit 0 ;;
+  restart) shift; cmd_restart "$@"; exit 0 ;;
   close)  shift; cmd_close "$@";  exit 0 ;;
   remove) shift; cmd_remove "$@"; exit 0 ;;
   --boot)     shift; cmd_boot "$@";     exit 0 ;;

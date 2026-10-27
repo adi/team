@@ -11,6 +11,59 @@ running a harness, and a status bar whose colour is derived from the folder name
 | `tmux-team.sh`  | builds or attaches to the session for a config |
 | `install.sh`   | installs the `team` command and the login-time service (systemd or launchd) |
 
+## Natural-language management from pi
+
+Install the extension without touching services or live teams:
+
+```bash
+bash ~/work/team/install-pi.sh
+```
+
+Run `/reload` in pi. Its `team_manage` tool supports listing/inspecting teams,
+adding/removing windows, editing saved commands, and restarting a window from
+its saved command. Ask naturally, for example:
+
+- "Add ~/work/pentester to new-b2b using pi --continue."
+- "Remove the pentest_murky window from new-b2b."
+- "Change pentester's saved command to pi --continue --model openai/gpt-6.1-sol."
+- "Restart pentester in new-b2b using its saved command."
+
+The tool inspects exact team/window names, calls the same CLI you use, and
+never attaches or switches your active view. Adding to a stopped team updates
+its config only. Command edits affect future starts, not the running process.
+Removing closes the live window and removes its saved entry.
+
+Restart defaults to refusing a running harness, a linked window, or multiple
+panes. Exit the harness first, or explicitly authorize `--force` to terminate
+its running work (linked windows are affected in every session). Multi-pane
+restarts remain refused. Removing/restarting the assistant's own window is
+refused by the tool. Manage it from another window instead. The CLI restart
+also guards its caller via `TMUX_PANE`.
+
+CLI equivalents:
+
+```bash
+team join new-b2b ~/work/pentester --cmd 'pi --continue' --no-attach
+team set-command new-b2b pentester --cmd 'pi --continue'
+team restart new-b2b pentester           # refuses a running process
+team restart new-b2b pentester --force   # explicitly terminate and restart
+team remove new-b2b pentester
+```
+
+`/reload` is needed after extension source changes. `PI_TEAM_DIR` can override
+the repository location; `TMUX_TEAM_CONFIG_DIR` and `TMUX_TEAM_PREFIX` are
+honored by both the extension and CLI. The standalone `install-pi.sh` does not
+modify your startup service. Saved commands are executable shell code; only
+use commands you trust. Mutation requests should name the target explicitly.
+
+Tests run against a private tmux socket, not your live server:
+
+```bash
+python3 -m unittest discover -s tests -v
+# With pi's dependencies resolvable (Node 24):
+node --experimental-strip-types --test tests/pi-extension.test.ts
+```
+
 ## Teams on the fly
 
 A team *is* a config file. `new` and `join` write one for you, so a team you

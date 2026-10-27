@@ -1,3 +1,7 @@
 # Configs are personal: they name the projects you work in, and `team new`
 # writes them as you go. Nothing in here belongs in the repo.
 configs/
+
+# Python test caches.
+__pycache__/
+*.pyc
