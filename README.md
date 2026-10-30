@@ -11,6 +11,44 @@ running a harness, and a status bar whose colour is derived from the folder name
 | `tmux-team.sh`  | builds or attaches to the session for a config |
 | `install.sh`   | installs the `team` command and the login-time service (systemd or launchd) |
 
+## Natural-language team management from Codex
+
+```bash
+bash ~/work/team/install-codex.sh
+```
+
+This installs the `team` MCP server with `team_manage`, plus the `codex-team`
+CLI. Reload MCP or resume Codex to discover the tool. The CLI works immediately:
+
+```bash
+codex-team call team_manage <<'JSON'
+{"action":"list"}
+JSON
+```
+
+Inspect exact team/window names before mutations. The actions match Pi:
+list, inspect, add, remove, set_command, restart. Add requires the authorized
+startup command; set_command changes future starts only. No action switches
+the user's view. Removal and restart require `caller_pane` from the current
+assistant shell's `TMUX_PANE` in MCP calls; the CLI fills it automatically.
+The assistant's own window cannot be removed or restarted, including with
+force. Force still requires explicit authorization to terminate running work.
+The underlying CLI retains its busy/linked-window safeguards.
+
+`CODEX_TEAM_DIR` (or `PI_TEAM_DIR`), `TMUX_TEAM_CONFIG_DIR`, and
+`TMUX_TEAM_PREFIX` override repository/config locations. Node 18+ is required;
+there are no npm dependencies. Installation preserves saved commands and live
+windows.
+
+**Agent-mail is maintained separately in `~/work/skills/agent-mail`.** Install
+its Codex integration with `~/work/skills/agent-mail/install-codex.sh`; its MCP
+server is `agent-mail` and CLI is `codex-agent-mail`. This repository does not
+own or implement mail handling.
+
+```bash
+node --test tests/codex-extension.test.mjs
+```
+
 ## Natural-language management from pi
 
 Install the extension without touching services or live teams:
