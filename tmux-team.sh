@@ -367,7 +367,7 @@ style_session() {
 
 # window-status-*, pane-border-* and *-rename are WINDOW options: "set -t <session>"
 # would land on that session's current window only. They have to be set per window.
-# The current-window highlight itself lives in ~/.tmux.conf as a "setw -g" default
+# The current-window highlight itself lives in the repo's tmux.conf as a "setw -g" default
 # so every session gets it; only what has to differ per window is here.
 style_window() {
   local w="$1" dir

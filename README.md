@@ -3,13 +3,31 @@
 Named configs, each one a tmux session with a window per folder, each window
 running a harness, and a status bar whose colour is derived from the folder name.
 
+## Quick start
+
+```bash
+git clone git@github.com:adi/team.git ~/work/team
+cd ~/work/team && ./install.sh   # add --no-start to install without starting teams
+cd ~/work/<project> && team new  # your first team
+```
+
+`install.sh` puts `team` in `~/.local/bin`, registers the login service, and adds
+one `source-file` line to your `~/.tmux.conf` that pulls in the shared
+[`tmux.conf`](tmux.conf). Your existing settings are kept (a timestamped `.bak`
+is saved) and still win over the shared ones. Pass `--no-tmux-conf` to skip that.
+Updating is just `git pull`, then `tmux source-file ~/.tmux.conf`.
+
+Needs tmux 3.4+ and python3. On iTerm2, Cmd+Left/Right window switching needs two
+key mappings; see the comment in `tmux.conf`.
+
 ## Files
 
 | file | what it is |
 |---|---|
 | `configs/<name>.json` | the files you edit: one entry per window (`dir`, `name`, `cmd`) |
 | `tmux-team.sh`  | builds or attaches to the session for a config |
-| `install.sh`   | installs the `team` command and the login-time service (systemd or launchd) |
+| `install.sh`   | installs the `team` command, the login-time service (systemd or launchd), and sources `tmux.conf` |
+| `tmux.conf`    | shared tmux settings (clipboard, passthrough, current-window highlight) |
 
 ## Natural-language team management from Codex
 
@@ -325,8 +343,8 @@ and it is easy to get wrong:
   `window-status-separator`, `window-status-*-style`, `pane-border-style`,
   `pane-active-border-style`, `allow-rename`, `automatic-rename`. These must be
   set with `set -t <window-id> -w`, **once per window** (`style_window`) — or,
-  where the value should apply everywhere, once with `setw -g` in
-  `~/.tmux.conf`, which every window in every session then inherits.
+  where the value should apply everywhere, once with `setw -g` in the shared
+  `tmux.conf`, which every window in every session then inherits.
 
 `set -t <session-id> window-status-format …` does not error — it silently lands
 on that session's *current window*, leaving every other window on the global

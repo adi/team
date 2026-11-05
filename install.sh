@@ -4,6 +4,7 @@
 #
 #   ./install.sh                 install `team`, start the teams now
 #   ./install.sh --no-start      install without starting them
+#   ./install.sh --no-tmux-conf  leave your tmux config alone
 #
 # Safe to re-run; each step is idempotent.
 set -euo pipefail
@@ -14,11 +15,13 @@ AGENT_DIR="$HOME/Library/LaunchAgents"
 LABEL="com.adi.team"
 BIN_DIR="$HOME/.local/bin"
 START=1
+TMUX_CONF=1
 
 for a in "$@"; do
   case "$a" in
     --no-start) START=0 ;;
-    *) echo "usage: $(basename "$0") [--no-start]" >&2; exit 1 ;;
+    --no-tmux-conf) TMUX_CONF=0 ;;
+    *) echo "usage: $(basename "$0") [--no-start] [--no-tmux-conf]" >&2; exit 1 ;;
   esac
 done
 
@@ -43,6 +46,34 @@ case ":$PATH:" in
     esac
     ;;
 esac
+
+# The shared settings live in the repo's tmux.conf. Source it from the user's
+# own config rather than replacing that file, so personal settings survive and a
+# `git pull` is all an update takes. tmux reads ~/.tmux.conf first and only falls
+# back to the XDG path when it is absent, so add the line to whichever is in use.
+if (( TMUX_CONF )); then
+  if [[ ! -e $HOME/.tmux.conf && -e ${XDG_CONFIG_HOME:-$HOME/.config}/tmux/tmux.conf ]]; then
+    USER_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/tmux/tmux.conf"
+  else
+    USER_CONF="$HOME/.tmux.conf"
+  fi
+  SOURCE_LINE="source-file \"$HERE/tmux.conf\""
+  if grep -qF "$SOURCE_LINE" "$USER_CONF" 2>/dev/null; then
+    echo "$USER_CONF already sources $HERE/tmux.conf"
+  else
+    # Prepend, so anything the user already set still overrides the shared defaults.
+    tmp="$(mktemp)"
+    { echo "# Shared settings for the team tool (see $HERE/README.md)."
+      echo "$SOURCE_LINE"
+      [[ -s $USER_CONF ]] && { echo; cat "$USER_CONF"; }
+    } > "$tmp"
+    [[ -e $USER_CONF ]] && cp "$USER_CONF" "$USER_CONF.bak.$(date +%s)"
+    mv "$tmp" "$USER_CONF"
+    echo "added '$SOURCE_LINE' to $USER_CONF"
+  fi
+  # Apply to a running server too; without one there is nothing to reload.
+  tmux source-file "$USER_CONF" 2>/dev/null && echo "reloaded the running tmux server" || true
+fi
 
 # Configs used to be pipe-delimited text. Convert any that are still around;
 # the original is kept as <name>.conf.bak rather than deleted, since a config is
